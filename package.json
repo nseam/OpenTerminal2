@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "element-plus": "^2.10.1",
-    "fx31337-wasm": "^0.1.36",
+    "fx31337-wasm": "^0.1.37",
     "json-tree-view-vue3": "^1.1.2",
     "three": "^0.178.0",
     "vue": "^3.5.17",
