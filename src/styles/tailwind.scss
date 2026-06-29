@@ -1,0 +1,52 @@
+@use "tailwindcss";
+
+@layer properties, theme, base, components, utilities;
+
+@source "../src/**/*.{vue,js,ts,jsx,tsx}";
+
+@utility row {
+  display: flex;
+  flex: 1 1 0%;
+  flex-direction: row;
+}
+
+@utility row-0 {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: row;
+}
+
+@utility col {
+  display: flex;
+  flex: 1 1 0%;
+  flex-direction: column;
+}
+
+@utility col-0 {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+}
+
+@theme {
+    --breakpoint-w0: calc(640px * 0.5);
+    --breakpoint-w1: calc(640px * 1);
+    --breakpoint-w2: calc(640px * 1.25);
+    --breakpoint-w3: calc(640px * 1.5);
+    --breakpoint-w4: calc(640px * 1.75);
+    --breakpoint-w5: calc(640px * 2);
+    --breakpoint-w6: calc(640px * 2.25);
+    --breakpoint-w7: calc(640px * 2.5);
+    --breakpoint-w8: calc(640px * 2.75);
+    --breakpoint-w9: calc(640px * 3);
+    --container-w100: 100px;
+    --container-w200: 200px;
+    --container-w300: 300px;
+    --container-w400: 400px;
+    --container-w500: 500px;
+    --container-w600: 600px;
+    --container-w700: 700px;
+    --container-w800: 800px;
+    --container-w900: 900px;
+    --container-w1000: 1000px;
+}
