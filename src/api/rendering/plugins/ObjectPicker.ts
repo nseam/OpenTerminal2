@@ -20,7 +20,7 @@ export class ObjectPicker extends RendererPlugin<ObjectPickerOptions>
         super(rendererPass, options);
     }
 
-    public pick(scene: Scene, camera: Camera, mousePosition: Gfx.Vector2): Gfx.Intersection<Gfx.Object3D>[] | undefined
+    public pick(scene: Scene, camera: Camera, mousePosition: Gfx.Vector2, expectedType?: new (...args: any[]) => Gfx.Object3D): Gfx.Intersection<Gfx.Object3D>[] | undefined
     {
         if (!scene || !camera) {
             // Nothing to pick from, no scene or camera.
@@ -29,9 +29,25 @@ export class ObjectPicker extends RendererPlugin<ObjectPickerOptions>
         }
 
         this.raycaster.setFromCamera(mousePosition, camera.native);
-        this.raycaster.params.Line.threshold = 0.5;
+        this.raycaster.params.Line.threshold = 0.2;
         this.raycaster.params.Points.threshold = 0.5;
         const intersects = this.raycaster.intersectObjects(scene.children, true);
+
+        // Also adding all parents of the instersected objects to the list of intersects, so that we can pick parent objects as well.
+        for (const intersect of intersects) {
+            let parent = intersect.object.parent;
+            while (parent) {
+                if (!intersects.find(i => i.object === parent)) {
+                    intersects.push({ ...intersect, object: parent });
+                }
+                parent = parent.parent;
+            }
+        }
+
+        if (expectedType) {
+            return intersects.filter(i => i.object instanceof expectedType);
+        }
+
         return intersects;
     }
 
@@ -39,5 +55,7 @@ export class ObjectPicker extends RendererPlugin<ObjectPickerOptions>
     }
 
     public override onChangeViewport(): void {
+        if (!this.scene)
+            return;
     }
 }

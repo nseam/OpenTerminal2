@@ -103,6 +103,9 @@ export class CameraMovement extends RendererPlugin<CameraMovementOptions>
         if (this.keysPressed['s']) dir.z += 1;
         if (this.keysPressed['a']) dir.x -= 1;
         if (this.keysPressed['d']) dir.x += 1;
+        if (this.keysPressed['q']) dir.y += 1;
+        if (this.keysPressed['z']) dir.y -= 1;
+        if (this.keysPressed['e']) dir.y -= 1;
 
         if (dir.lengthSq() > 0) {
             dir.normalize();
@@ -112,6 +115,7 @@ export class CameraMovement extends RendererPlugin<CameraMovementOptions>
             const movement = new Gfx.Vector3();
             movement.addScaledVector(forward, -dir.z);
             movement.addScaledVector(right, dir.x);
+            movement.addScaledVector(new Gfx.Vector3(0, 1, 0), dir.y);
             movement.multiplyScalar(this.options?.speed ?? 0.03);
             camera.position.add(movement);
         }

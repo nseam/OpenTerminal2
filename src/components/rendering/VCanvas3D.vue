@@ -31,9 +31,13 @@
     import { RendererRenderPass } from '../../api/rendering/RendererRenderPass';
 
     // @ts-ignore
-    import createModule from '../../../dist/IndicatorTest.js';
+    import createModule from 'fx31337-wasm/dist/IndicatorTest.js';
     import { Test, run, LibModule } from 'fx31337-wasm/lib/Runner';
     import { TesterValues } from 'fx31337-wasm/lib/types/TesterValues.js';
+    import { Bar } from '../../api/rendering/objects/Bar';
+    import { ChartObjectManipulator } from '../../api/rendering/plugins/chart/ChartObjectManipulator';
+    import { Chart } from '../../api/rendering/objects/Chart';
+    import { Series } from '../../api/rendering/objects/Series';
 
     class IndicatorRunTest extends Test {
         async run(lib: LibModule): Promise<void> {
@@ -70,8 +74,6 @@
         }
     }
 
-    run(IndicatorRunTest, createModule, 'dist/IndicatorTest.wasm');
-
 
     @Component({
         components: {
@@ -87,17 +89,12 @@
 
         async mounted()
         {
-
-
-
+            run(IndicatorRunTest, createModule, 'node_modules/fx31337-wasm/dist/IndicatorTest.wasm');
 
             const scene = new Scene();
 
 
             const camera = new Camera(CameraKind.Perspective, 75, 0.1, 1000);
-            camera.position.x = 0;
-            camera.position.y = 0.5;
-            camera.position.z = 0.7;
 
             // const camera = new Camera(CameraKind.Orthographic, 75, 0.1, 100);
             // Rotating camera 180 degrees around Y axis to look towards negative Z direction.
@@ -107,19 +104,7 @@
 
             this.renderer = new Renderer(this.canvas, { antialias: true }, scene);
 
-            const material1 = new Gfx.MeshStandardMaterial({ color: 0x007bff, metalness: 0.5, roughness: 0.5, dithering: true })
-            const material2 = new Gfx.MeshStandardMaterial({ color: 0xbb73ff, metalness: 0.5, roughness: 0.5, dithering: true })
-
-            const geometry1 = new Gfx.BoxGeometry();
-            const cube1 = new Gfx.Mesh(geometry1, material1);
-            //scene.add(cube1);
-
-            const geometry2 = new Gfx.BoxGeometry();
-            const sphere = new Gfx.Mesh(geometry2, material2);
-            sphere.position.set(0.3, 0.2, 0.4);
-            //scene.add(sphere);
-
-            const light = new Gfx.DirectionalLight(0xffffff, 1.9);
+            const light = new Gfx.DirectionalLight(0xffffff, 0.9);
             light.position.set(10, 2, 5);
             scene.add(light);
 
@@ -130,30 +115,25 @@
             const gridStep = 0.1;
             const gridSize = 16;
 
-            scene.add(new Grid(gridSize, gridSize / gridStep, 0, 0x337733, 0x151515));
-            scene.add(new Grid(gridSize, gridSize / gridStep / 10, 0, 0x337733, 0x333333));
-            scene.add(new Grid(gridSize, gridSize / gridStep / 100, 0, 0x337733, 0x336699));
+            //scene.add(new Grid(gridSize, gridSize / gridStep, 0, 0x337733, 0x151515));
+            //scene.add(new Grid(gridSize, gridSize / gridStep / 10, 0, 0x337733, 0x333333));
+            //scene.add(new Grid(gridSize, gridSize / gridStep / 100, 0, 0x337733, 0x336699));
 
-            //scene.add(new Grid(gridSize, gridSize / gridStep, 0, 0x337733, 0x151515).rotateX(-Math.PI / 2));
+            const chart = new Chart(100, 0.05, 0.04);
+            const series = new Series();
 
-            cube1.material.needsUpdate = true;
+            chart.addSeries(series);
 
-            /*
-            const result = await this.$api.testManifoldBooleans();
+            series.randomizeBars();
 
-            // Creating gemometry from the result of boolean operations.
-            const geometry3 = new Gfx.BufferGeometry();
-            const vertices = new Float32Array(result.vertices.flat());
-            const indices = new Uint32Array(result.triangles.flat());
-            geometry3.setAttribute('position', new Gfx.BufferAttribute(vertices, 3));
-            geometry3.setIndex(new Gfx.BufferAttribute(indices, 1));
-            //geometry3.computeVertexNormals();
-            const material3 = new Gfx.MeshStandardMaterial({ color: 0xff0077, metalness: 0.5, roughness: 0.5, dithering: true })
-            const mesh3 = new Gfx.Mesh(geometry3, material3);
-            //mesh3.position.set(-0.5, 0.2, -0.5);
-            scene.add(mesh3);
-            */
+            scene.add(chart);
 
+            // Centering camera on the chart but from the behind.
+            const bbox = chart.getBBox();
+            camera.position.set((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
+            camera.lookAt((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
+            
+            
 
             // Create a plane and apply the generated texture to it.
             const planeGeometry = new Gfx.PlaneGeometry(1, 1)
@@ -167,16 +147,14 @@
             plane.scale.set(1, 1, 1);
             //scene.add(plane)
 
-            scene.background = new Gfx.Color(0.003, 0.004, 0.009);
+            scene.background = new Gfx.Color(0x171717);
 
             const rendererPass = this.renderer.addRenderPass({
                 name: 'main',
                 scene,
                 camera,
                 loop: (time: DOMHighResTimeStamp, frame: XRFrame) => {
-                    // Rotate effectShadow's direction slightly over time.
-                    //this.effectShadow.shadowDirection.x = Math.cos(time * 0.001) * 0.5;
-                    //this.effectShadow.shadowDirection.y = Math.sin(time * 0.001) * 0.5;
+                    
                 }
             });
 
@@ -188,6 +166,8 @@
                 bloom: true,
             });
 
+            rendererPass.addPlugin(ObjectPicker);
+            rendererPass.addPlugin(ChartObjectManipulator);
             rendererPass.addPlugin(CameraMovement);
             rendererPass.addPlugin(FpsDisplay);
 
