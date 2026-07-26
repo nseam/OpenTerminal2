@@ -1,5 +1,7 @@
 import * as Gfx from 'three';
 import { Bar } from './Bar';
+import { type TesterValuesColumns } from 'fx31337-wasm/lib/types/TesterValuesColumns';
+import { Chart } from './Chart';
 
 /**
  * A series of OHLC bars rendered efficiently using InstancedMesh.
@@ -11,11 +13,16 @@ export class Series extends Gfx.Object3D
     // Unique identifier for the series. It's not the id of the Object3D as we need the id to be persistent across sessions.
     public uuid: string = crypto.randomUUID();
 
-    // List of bar data objects (no longer Object3Ds).
+    // Pool of bar data objects. Grows to the historical maximum but never shrinks,
+    // so Bar objects are reused across zoom changes without re-allocation.
     public bars: Bar[] = [];
-    /** Returns the number of bars in this series. */
+
+    /** Number of currently active (visible) bars — always ≤ bars.length. */
+    private _activeBarCount: number = 0;
+
+    /** Returns the number of active bars in this series. */
     public getNumBars(): number {
-        return this.bars.length;
+        return this._activeBarCount;
     }
     /** Shared unit-cube geometry for InstancedMesh. */
     private _boxGeometry = new Gfx.BoxGeometry(1, 1, 1);
@@ -27,10 +34,13 @@ export class Series extends Gfx.Object3D
     private _boxMaterial = new Gfx.MeshLambertMaterial();
 
     /** BufferGeometry holding all vertical lines as LineSegments pairs. */
-    private _lineGeometry = new Gfx.BufferGeometry();
+    private _lineGeometry: Gfx.BufferGeometry | null = null;
 
     /** Single LineSegments that renders all bar wicks. */
     private _lineMesh: Gfx.LineSegments | null = null;
+
+    /** Material for the line mesh (tracked for proper disposal). */
+    private _lineMaterial: Gfx.LineBasicMaterial | null = null;
 
     /** Temporary color reused when setting instance colors. */
     private _tempColor = new Gfx.Color();
@@ -38,8 +48,31 @@ export class Series extends Gfx.Object3D
     /** The current bar width (used for scale). */
     private _barWidth: number = 0.1;
 
-    /** Maximum number of instances allocated so far. */
-    private _maxInstances: number = 0;
+    /** The current bar spacing (used for layout). */
+    private _barSpacing: number = 0.05;
+
+    /** Allocated GPU buffer capacity in number of bars — only grows, never shrinks on zoom. */
+    private _allocatedCapacityMesh: number = 0;
+
+    /** Allocated GPU buffer capacity in number of lines — only grows, never shrinks on zoom. */
+    private _allocatedCapacityLines: number = 0;
+
+    /** The data for this series, stored as an array of TesterValuesColumns. */
+    private _data: TesterValuesColumns[] = [];
+
+    /**
+     * Gets the current data set for this series.
+     */
+    public getData(): TesterValuesColumns[] {
+        return this._data;
+    }
+
+    /**
+     * Gets the current data set for this series.
+     */
+    public getData(): TesterValuesColumns[] {
+        return this._data;
+    }
 
     /** Constructor. */
     public constructor() {
@@ -47,35 +80,56 @@ export class Series extends Gfx.Object3D
     }
 
     /**
-     * Sets the number of bars in the series.
+     * Sets the data for this series. The data is stored as an array of TesterValuesColumns, which contains the OHLC values for each bar.
+     * 
+     * @param data The data to set for this series.
+     */
+    public setData(data: TesterValuesColumns[]): void {
+        this._data = data;
+
+        this.updateGraphics();
+    }
+
+    /**
+     * Sets the number of bars displayed at one for the series.
      * 
      * @param numBars The number of bars to set.
      * @param barWidth The width of each bar.
      * @param barSpacing The spacing between bars.
      */
-    public setNumBars(numBars: number, barWidth: number, barSpacing: number): void {
+    public setNumBarsDisplayed(numBars: number, barWidth: number, barSpacing: number): void {
         if (numBars < 0)
             throw new Error('Number of bars cannot be negative.');
 
-        this._barWidth = barWidth;
+        // Use Math.ceil to ensure the target is an integer so that the bar array length
+        // and allocated capacity are always in sync.
+        const numBarsInt = Math.ceil(numBars);
 
-        // Remove excess bars if the new number is less than the current number.
-        while (this.bars.length > numBars) {
-            this.bars.pop();
-            // Bars are no longer Object3Ds, so nothing to remove from scene graph.
-        }
+        this._barWidth = this.parent instanceof Chart ? barWidth * (this.parent as Chart)._zoom : barWidth;
+        this._barSpacing = this.parent instanceof Chart ? barSpacing * (this.parent as Chart)._zoom : barSpacing;
 
-        // Add new bars if the new number is greater than the current number.
-        while (this.bars.length < numBars) {
+        // Grow the bar pool only when we need more bars than ever before.
+        // Existing Bar objects are reused on zoom-out — no allocation needed.
+        while (this.bars.length < numBarsInt) {
             const previousBar = this.bars.length > 0 ? this.bars[this.bars.length - 1] : null;
             this.bars.push(new Bar(previousBar));
         }
 
-        // Ensure InstancedMesh and LineSegments have enough capacity.
-        this._ensureCapacity(numBars);
+        // Activate exactly numBarsInt bars — no objects created or destroyed.
+        this._activeBarCount = numBarsInt;
 
+        // Sets InstancedMesh and LineSegments capacity.
+        this._setCapacity(numBarsInt);
+
+        this.updateGraphics();
+    }
+
+    /**
+     * Updates the graphics for the series, including layout, instance matrices, and line geometry.
+     */
+    public updateGraphics(): void {
         // Layout bars in the x-axis.
-        this.layoutBars(barWidth, barSpacing);
+        this.layoutBars(this._barWidth, this._barSpacing);
 
         // Update all instance matrices and colors.
         this.updateInstances();
@@ -85,56 +139,96 @@ export class Series extends Gfx.Object3D
     }
 
     /**
-     * Ensures InstancedMesh / LineSegments have at least `count` instances/vertices.
+     * Ensures the InstancedMesh capacity is at least `count`. Only reallocates when the
+     * requested count exceeds the current GPU buffer size. Otherwise reuses the existing
+     * buffer and adjusts the draw count via `InstancedMesh.count`.
      */
-    private _ensureCapacity(count: number): void {
-        // --- InstancedMesh ---
+    private _setInstancedMeshCapacity(count: number): void {
         if (this._instancedMesh === null) {
             // First creation: build the mesh and attach to scene graph.
             this._instancedMesh = new Gfx.InstancedMesh(this._boxGeometry, this._boxMaterial, count);
             this._instancedMesh.instanceMatrix.setUsage(Gfx.DynamicDrawUsage);
             this.add(this._instancedMesh);
-        } else if (count > this._maxInstances) {
-            // Grow: InstancedMesh constructor doesn't support resizing directly.
-            // We create a new InstancedMesh with the larger size and copy instance data.
-            const oldCount = this._maxInstances;
+        } else if (count > this._allocatedCapacityMesh) {
+            // Buffer too small — must grow. Copy existing instance data into a new larger mesh.
+            const oldMesh = this._instancedMesh;
+            const copyCount = this._allocatedCapacityMesh;
+
             this._instancedMesh = new Gfx.InstancedMesh(this._boxGeometry, this._boxMaterial, count);
             this._instancedMesh.instanceMatrix.setUsage(Gfx.DynamicDrawUsage);
 
-            // Copy existing instance matrices.
-            for (let i = 0; i < oldCount; i++) {
-                this._instancedMesh.setMatrixAt(i, this._getMatrixAt(i));
-                this._instancedMesh.setColorAt(i, this._getColorAt(i));
+            const targetMatrix = new Gfx.Matrix4();
+            for (let i = 0; i < copyCount; i++) {
+                oldMesh.getMatrixAt(i, targetMatrix);
+                this._instancedMesh.setMatrixAt(i, targetMatrix);
+                if (oldMesh.instanceColor && this._instancedMesh.instanceColor) {
+                    oldMesh.getColorAt(i, this._tempColor); // reuse — no per-instance allocation
+                    this._instancedMesh.setColorAt(i, this._tempColor);
+                }
             }
+
             this._instancedMesh.instanceMatrix.needsUpdate = true;
             if (this._instancedMesh.instanceColor)
                 this._instancedMesh.instanceColor.needsUpdate = true;
 
-            // Replace in scene graph.
-            const parent = this._instancedMesh.parent;
-            parent?.remove(this._instancedMesh);
-            // The old mesh will be GC'd since nothing references it anymore.
+            oldMesh.parent?.remove(oldMesh);
             this.add(this._instancedMesh);
+
+            this._allocatedCapacityMesh = count;
         }
+        // Always clamp the draw count to the requested number — no reallocation needed.
+        this._instancedMesh.count = count;
+    }
 
-        // --- LineSegments ---
-        if (this._lineMesh === null) {
-            // Each bar needs 2 vertices (1 line segment). We use LineSegments so each pair = 1 line.
-            const positions = new Float32Array(count * 6); // 3 coords × 2 verts per line
-            this._lineGeometry.setAttribute('position', new Gfx.BufferAttribute(positions, 3));
-            this._lineGeometry.setDrawRange(0, 0); // start with nothing drawn
+    /**
+     * Ensures the LineSegments buffer capacity is at least `count`. Only reallocates when the
+     * requested count exceeds the current GPU buffer size. Otherwise reuses the existing
+     * buffer and adjusts the draw range via `setDrawRange`.
+     */
+    private _setLineSegmentsCapacity(count: number): void {
+        if (this._lineMesh === null || count > this._allocatedCapacityLines) {
+            // Dispose old material and geometry.
+            if (this._lineMaterial) {
+                this._lineMaterial.dispose();
+                this._lineMaterial = null;
+            } 
+            if (this._lineGeometry) {
+                this._lineGeometry.dispose();
+                this._lineGeometry = null;
+            }
+            if (this._lineMesh) {
+                this.remove(this._lineMesh);
+                this._lineMesh = null;
+            }
 
-            this._lineMesh = new Gfx.LineSegments(this._lineGeometry, new Gfx.LineBasicMaterial());
+            // Create new geometry and buffers sized to the new capacity.
+            this._lineGeometry = new Gfx.BufferGeometry();
+            const posAttr = new Gfx.BufferAttribute(new Float32Array(count * 6), 3);
+            const colAttr = new Gfx.BufferAttribute(new Float32Array(count * 6), 3);
+            //posAttr.setUsage(Gfx.DynamicDrawUsage);
+            //colAttr.setUsage(Gfx.DynamicDrawUsage);
+            this._lineGeometry.setAttribute('position', posAttr);
+            this._lineGeometry.setAttribute('color', colAttr);
+
+            this._lineMaterial = new Gfx.LineBasicMaterial({ vertexColors: true });
+            this._lineMesh = new Gfx.LineSegments(this._lineGeometry, this._lineMaterial);
             this.add(this._lineMesh);
-        }
 
-        if (count * 6 > (this._lineGeometry.attributes.position.array as Float32Array).length) {
-            const positions = new Float32Array(count * 6);
-            this._lineGeometry.setAttribute('position', new Gfx.BufferAttribute(positions, 3));
-            this._lineGeometry.setDrawRange(0, 0);
+            this._allocatedCapacityLines = count;
         }
+        // Always update the draw range to exactly the requested count — no reallocation needed.
+        this._lineGeometry!.setDrawRange(0, count * 2);
 
-        this._maxInstances = Math.max(this._maxInstances, count);
+   }
+
+    /**
+     * Ensures InstancedMesh and LineSegments buffers can hold at least `count` bars.
+     * Buffers only grow — they are never shrunk on zoom. The visible draw count is
+     * adjusted via `InstancedMesh.count` / `setDrawRange` to avoid GPU reallocations.
+     */
+    private _setCapacity(count: number): void {
+        this._setInstancedMeshCapacity(count);
+        this._setLineSegmentsCapacity(count);
     }
 
     /**
@@ -164,7 +258,7 @@ export class Series extends Gfx.Object3D
      * @param spacing The spacing between bars.
      */
     public layoutBars(barWidth: number = 0.1, spacing: number = 0.1): void {
-        for (let i = 0; i < this.bars.length; i++) {
+        for (let i = 0; i < this._activeBarCount; i++) {
             const bar = this.bars[i];
             bar.posX = i * (barWidth + spacing);
         }
@@ -174,9 +268,11 @@ export class Series extends Gfx.Object3D
      * Updates all instance matrices and colors on the InstancedMesh.
      */
     private updateInstances(): void {
-        if (!this._instancedMesh) return;
+        if (!this._instancedMesh)
+            return;
 
-        const count = this.bars.length;
+        const count = this._activeBarCount;
+
         for (let i = 0; i < count; i++) {
             const bar = this.bars[i];
             const boxHeight = Math.abs(bar.c - bar.o);
@@ -200,10 +296,12 @@ export class Series extends Gfx.Object3D
      * Updates the shared LineSegments geometry with all bar wicks (high→low lines).
      */
     private updateLines(): void {
-        if (!this._lineMesh) return;
+        if (!this._lineMesh || !this._lineGeometry)
+            return;
 
         const positions = this._lineGeometry.attributes.position.array as Float32Array;
-        const count = this.bars.length;
+        const colors = this._lineGeometry.attributes.color.array as Float32Array;
+        const count = this._activeBarCount;
 
         for (let i = 0; i < count; i++) {
             const bar = this.bars[i];
@@ -215,18 +313,13 @@ export class Series extends Gfx.Object3D
             const dc = bar.displayColor;
             this._tempColor.set(dc.r, dc.g, dc.b);
             // LineSegments uses vertex colors — assign to both vertices of each segment.
-            if (!this._lineGeometry.attributes.color) {
-                this._lineGeometry.setAttribute('color', new Gfx.BufferAttribute(new Float32Array(this._maxInstances * 6), 3));
-            }
-            const colors = this._lineGeometry.attributes.color.array as Float32Array;
             const cBase = (i * 6); // 3 RGB × 2 verts
             colors[cBase + 0] = dc.r; colors[cBase + 1] = dc.g; colors[cBase + 2] = dc.b;
             colors[cBase + 3] = dc.r; colors[cBase + 4] = dc.g; colors[cBase + 5] = dc.b;
         }
 
         this._lineGeometry.attributes.position.needsUpdate = true;
-        if (this._lineGeometry.attributes.color)
-            this._lineGeometry.attributes.color.needsUpdate = true;
+        this._lineGeometry.attributes.color.needsUpdate = true;
 
         this._lineGeometry.setDrawRange(0, count * 2); // 2 vertices per line segment
     }
@@ -235,15 +328,40 @@ export class Series extends Gfx.Object3D
      * Randomizes the values of the bars in the series. This is useful for testing purposes.
      */
     public randomizeBars(): void {
-        for (let i = 0; i < this.bars.length; i++) {
+        const date = new Date();
+
+        for (let i = 0; i < this._activeBarCount; i++) {
             const bar = this.bars[i];
             const o = i > 0 ? this.bars[i - 1].c : Math.random() * 0.2;
             const h = o + Math.random() * 0.2;
             const l = o - Math.random() * 0.2;
             const c = l + Math.random() * (h - l);
-            bar.setValues(o, h, l, c);
+            bar.setValues(date.getTime(), o, h, l, c);
+            date.setTime(date.getTime() + 60 * 1000); // Increment by 1 minute for each bar.
         }
         // After randomizing, push updates to GPU.
+        this.updateInstances();
+        this.updateLines();
+    }
+
+    public updateBarsFromData(data: TesterValuesColumns, startIndex: number = 0): void {
+        const date = new Date();
+
+        console.log(`Updating bars from data starting at index ${startIndex}. Data length: ${data.values.length}, Active bars: ${this._activeBarCount}`);
+
+        for (let i = 0; i < this._activeBarCount; i++) {
+            const bar = this.bars[i];
+            if (i + startIndex < data.values.length) {
+                const row = data.values[i + startIndex];
+                const ohlc = row.GetValues4();
+                bar.setValues(date.getTime(), ohlc.val1, ohlc.val2, ohlc.val3, ohlc.val4);
+            } else {
+                // If there's no data for this bar, set it to zero values.
+                bar.setValues(date.getTime(), 0, 0, 0, 0);
+            }
+            date.setTime(date.getTime() + 60 * 1000); // Increment by 1 minute for each bar.
+        }
+        // After updating from data, push updates to GPU.
         this.updateInstances();
         this.updateLines();
     }
@@ -266,7 +384,7 @@ export class Series extends Gfx.Object3D
     public updateColors(): void {
         if (!this._instancedMesh) return;
 
-        const count = this.bars.length;
+        const count = this._activeBarCount;
         for (let i = 0; i < count; i++) {
             const dc = this.bars[i].displayColor;
             this._tempColor.set(dc.r, dc.g, dc.b);
@@ -287,7 +405,7 @@ export class Series extends Gfx.Object3D
     public updateMatricesOnly(): void {
         if (!this._instancedMesh) return;
 
-        const count = this.bars.length;
+        const count = this._activeBarCount;
         for (let i = 0; i < count; i++) {
             const bar = this.bars[i];
             const boxHeight = Math.abs(bar.c - bar.o);

@@ -119,12 +119,12 @@
             //scene.add(new Grid(gridSize, gridSize / gridStep / 10, 0, 0x337733, 0x333333));
             //scene.add(new Grid(gridSize, gridSize / gridStep / 100, 0, 0x337733, 0x336699));
 
-            const chart = new Chart(100, 0.05, 0.04);
+            const chart = new Chart(20, 0.05, 0.04);
             const series = new Series();
 
             chart.addSeries(series);
 
-            series.randomizeBars();
+            chart.setData(Chart.randomizeData());
 
             scene.add(chart);
 
@@ -167,7 +167,9 @@
             });
 
             rendererPass.addPlugin(ObjectPicker);
-            rendererPass.addPlugin(ChartObjectManipulator);
+            rendererPass.addPlugin(ChartObjectManipulator, {
+                chart: chart,
+            });
             rendererPass.addPlugin(CameraMovement);
             rendererPass.addPlugin(FpsDisplay);
 

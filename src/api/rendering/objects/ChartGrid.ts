@@ -28,6 +28,12 @@ export class ChartGrid extends Gfx.Object3D
      */
     public gridCube: Gfx.Mesh = new Gfx.Mesh(new Gfx.BoxGeometry(1, 1, 1), new Gfx.MeshBasicMaterial({ color: 0x0d0d0d, side: Gfx.BackSide }));
 
+    /** The shift of the grid lines in the x-axis. This will be used to scroll the grid lines when the chart is scrolled. */
+    public gridLinesShiftX: number = 0;
+
+    /** The shift of the grid lines in the y-axis. This will be used to scroll the grid lines when the chart is scrolled. */
+    public gridLinesShiftY: number = 0;
+
     /**
      * Construtor.
      */
@@ -45,7 +51,8 @@ export class ChartGrid extends Gfx.Object3D
     /**
      * Layouts the grid lines of the chart. This will be called whenever the chart is updated.
      * 
-     * Lines will be laid out based on the chart's OHLC value. The grid lines will be laid out in the x-axis and y-axis.
+     * Lines will be laid out based on the chart's bounding box. The grid lines will be laid out in
+     * the x-axis and y-axis, scrolled by gridLinesShiftX and gridLinesShiftY respectively.
      */
     public layoutGridLines(): void {
         if (!this.chart) {
@@ -54,84 +61,101 @@ export class ChartGrid extends Gfx.Object3D
         }
 
         const chart = this.chart;
-        
-        // Drawing line on both sides (left and right) of the chart's bounding box. The lines will start from the left-front side of the bounding box and end at the left-back side of the bounding box. The lines will be laid out in the y-axis based on the chart's OHLC value.
-        const ohlc = chart.getOHLC();
         const bbox = chart.getBBox();
+        const chartWidth  = bbox.max.x - bbox.min.x;
+        const chartHeight = bbox.max.y - bbox.min.y;
 
-        const numLinesVertical = 10;
-        const numLinesHorizontal = this.chart.getNumBars();
+        const numLinesVertical   = 10;
+        const numLinesHorizontal = this.chart.numHorizontalGridLines;
 
+        // Reallocate the GPU buffer only when line counts change.
         if (numLinesVertical !== this.numGridLinesVertical || numLinesHorizontal !== this.numGridLinesHorizontal) {
-            // Calculate total position values needed (each line = 2 points × 3 components = 6 values)
-            const numLinePairsV = numLinesVertical + 1;
-            const numLinePairsH = numLinesHorizontal + 1;
+            const numLinePairsV  = numLinesVertical   + 1;
+            const numLinePairsH  = numLinesHorizontal + 1;
             const totalLinePairs = 3 * numLinePairsV + 2 * numLinePairsH + 4;
-            const totalValues = totalLinePairs * 6;
+            const totalValues    = totalLinePairs * 6;
 
-            // Allocate or grow buffer only when we need more space
             if (!this.positionBuffer || totalValues > this.positionBuffer.array.length) {
                 this.positionBuffer = new Gfx.Float32BufferAttribute(new Float32Array(totalValues), 3);
+                this.gridLinesVertical.geometry.setAttribute('position', this.positionBuffer);
             }
 
-            // Write positions directly into the existing buffer's underlying array
-            const arr = this.positionBuffer.array;
-            let idx = 0;
-
-            for (let i = 0; i <= numLinesVertical; i++) {
-                const y = bbox.min.y + (bbox.max.y - bbox.min.y) * (i / numLinesVertical);
-                arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
-                arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.max.z;
-            }
-
-            for (let i = 0; i <= numLinesVertical; i++) {
-                const y = bbox.min.y + (bbox.max.y - bbox.min.y) * (i / numLinesVertical);
-                arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
-                arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.max.z;
-            }
-
-            for (let i = 0; i <= numLinesVertical; i++) {
-                const y = bbox.min.y + (bbox.max.y - bbox.min.y) * (i / numLinesVertical);
-                arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
-                arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
-            }
-
-            for (let i = 0; i <= numLinesHorizontal; i++) {
-                const x = bbox.min.x + (bbox.max.x - bbox.min.x) * (i / numLinesHorizontal);
-                arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
-                arr[idx++] = x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
-            }
-
-            for (let i = 0; i <= numLinesHorizontal; i++) {
-                const x = bbox.min.x + (bbox.max.x - bbox.min.x) * (i / numLinesHorizontal);
-                arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
-                arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-            }
-
-            arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
-            arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-
-            arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
-            arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-
-            arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-            arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-
-            arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
-            arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
-
-            // Reuse the same buffer attribute — no new allocation
-            this.gridLinesVertical.geometry.setAttribute('position', this.positionBuffer);
-
-            this.numGridLinesVertical = numLinesVertical;
+            this.numGridLinesVertical   = numLinesVertical;
             this.numGridLinesHorizontal = numLinesHorizontal;
         }
 
+        if (!this.positionBuffer) return;
+
+        // Normalize horizontal shift to [0, chartWidth) so vertical lines wrap seamlessly.
+        const shiftX = chartWidth > 0 ? ((this.gridLinesShiftX % chartWidth) + chartWidth) % chartWidth : 0;
+
+        // Always rewrite positions so scroll shifts are applied every frame.
+        const arr = this.positionBuffer.array as Float32Array;
+        let idx = 0;
+
+        // Left side — horizontal lines at fixed y positions (no vertical scroll).
+        for (let i = 0; i <= numLinesVertical; i++) {
+            const y = bbox.min.y + chartHeight * (i / numLinesVertical);
+            arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
+            arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.max.z;
+        }
+
+        // Right side — horizontal lines at fixed y positions.
+        for (let i = 0; i <= numLinesVertical; i++) {
+            const y = bbox.min.y + chartHeight * (i / numLinesVertical);
+            arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
+            arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.max.z;
+        }
+
+        // Front face — horizontal lines at fixed y positions.
+        for (let i = 0; i <= numLinesVertical; i++) {
+            const y = bbox.min.y + chartHeight * (i / numLinesVertical);
+            arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
+            arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
+        }
+
+        // Front face — vertical lines at varying x, scrolled horizontally.
+        for (let i = 0; i <= numLinesHorizontal; i++) {
+            const x = bbox.min.x + ((chartWidth * (i / numLinesHorizontal) + shiftX) % chartWidth);
+            arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
+            arr[idx++] = x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
+        }
+
+        // Bottom face — vertical lines at varying x, scrolled horizontally.
+        for (let i = 0; i <= numLinesHorizontal; i++) {
+            const x = bbox.min.x + ((chartWidth * (i / numLinesHorizontal) + shiftX) % chartWidth);
+            arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
+            arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
+        }
+
+        // Back/top corner edges (static — not scrolled).
+        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
+        arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
+
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
+
+        arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
+
+        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
+
+        this.positionBuffer.needsUpdate = true;
+        this.gridLinesVertical.geometry.setDrawRange(0, idx / 3);
+
         // Positioning the grid cube to match the chart's bounding box.
-        // We will add a little bit of padding to the grid cube so that it doesn't overlap with the chart's bars.
         const padding = 0.00001;
-        this.gridCube.position.set((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, (bbox.min.z + bbox.max.z) / 2);
-        this.gridCube.scale.set(bbox.max.x - bbox.min.x + padding, bbox.max.y - bbox.min.y + padding, bbox.max.z - bbox.min.z + padding);
+        this.gridCube.position.set(
+            (bbox.min.x + bbox.max.x) / 2,
+            (bbox.min.y + bbox.max.y) / 2,
+            (bbox.min.z + bbox.max.z) / 2
+        );
+        this.gridCube.scale.set(
+            chartWidth  + padding,
+            chartHeight + padding,
+            bbox.max.z - bbox.min.z + padding
+        );
     }
 
     /**

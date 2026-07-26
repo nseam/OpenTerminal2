@@ -8,6 +8,8 @@ export interface CameraMovementOptions {
     speed?: number;       // Speed of camera movement.
     rotationSpeed?: number; // Speed of camera rotation.
     zoomSpeed?: number;   // Speed of camera zoom.
+    enableScrollZoom?: boolean; // Whether to enable zooming with the mouse wheel.
+    enablePanning?: boolean; // Whether to enable panning with the middle mouse button.
 }
 
 /**
@@ -59,7 +61,9 @@ export class CameraMovement extends RendererPlugin<CameraMovementOptions>
         window.addEventListener('mousemove', this.handleMouseMove.bind(this));
         window.addEventListener('mouseup', this.handleMouseUp.bind(this));
         window.addEventListener('blur', this.handleBlur.bind(this));
-        canvas.addEventListener('wheel', this.handleWheel.bind(this), { passive: false });
+
+        if (this.options?.enableScrollZoom)
+            canvas.addEventListener('wheel', this.handleWheel.bind(this), { passive: false });
     }
 
     /**
@@ -72,7 +76,9 @@ export class CameraMovement extends RendererPlugin<CameraMovementOptions>
         window.removeEventListener('mousemove', this.handleMouseMove);
         window.removeEventListener('mouseup', this.handleMouseUp);
         window.removeEventListener('blur', this.handleBlur);
-        canvas.removeEventListener('wheel', this.handleWheel);
+
+        if (this.options?.enableScrollZoom)
+            canvas.removeEventListener('wheel', this.handleWheel);
     }
 
     /**
@@ -179,7 +185,7 @@ export class CameraMovement extends RendererPlugin<CameraMovementOptions>
             return;
 
         // Middle mouse button held: pan camera in world-aligned X/Y axes.
-        if (e.buttons & 4) {
+        if (this.options?.enablePanning && e.buttons & 4) {
             const deltaX = e.clientX - this.lastMouseX;
             const deltaY = e.clientY - this.lastMouseY;
 

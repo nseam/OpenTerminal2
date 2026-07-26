@@ -8,6 +8,7 @@ import { Chart } from "../../objects/Chart";
 
 // Options for the ChartObjectManipulator plugin.
 export interface ChartObjectManipulatorOptions {
+    chart: Chart;
 }
 
 /**
@@ -27,6 +28,9 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     // Whether the Alt key is currently pressed.
     private isAltPressed = false;
 
+    // Whether the Shift key is currently pressed.
+    private isShiftPressed = false;
+
     // Whether the mouse is currently being dragged for object manipulation.
     private isDragging = false;
 
@@ -39,16 +43,25 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     // Whether the mouse is currently being dragged for camera panning.
     private isPanning = false;
 
+    // Whether the mouse is currently being dragged for chart scrolling.
+    private isScrolling = false;
+
+    // Vector2 cache.
     private _cacheVector2: Gfx.Vector2 = new Gfx.Vector2();
+
+    // The chart object that this manipulator is currently interacting with.
+    private _chart: Chart;
 
     /**
      * Creates a new ChartObjectManipulator plugin.
      * @param rendererPass The render pass that this plugin is attached to.
      * @param options Optional configuration options for chart object manipulation.
      */
-    public constructor(rendererPass: RendererRenderPass, options?: ChartObjectManipulatorOptions)
+    public constructor(rendererPass: RendererRenderPass, options: ChartObjectManipulatorOptions)
     {
         super(rendererPass, options);
+
+        this._chart = options.chart;
     }
 
     /**
@@ -169,6 +182,12 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      */
     private handleKeyDown(e: KeyboardEvent): void {
         this.keysPressed[e.key.toLowerCase()] = true;
+
+        if (e.shiftKey)
+            this.isShiftPressed = true;
+
+        if (e.altKey)
+            this.isAltPressed = true;
     }
 
     /**
@@ -177,6 +196,12 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      */
     private handleKeyUp(e: KeyboardEvent): void {
         this.keysPressed[e.key.toLowerCase()] = false;
+
+        if (!e.shiftKey)
+            this.isShiftPressed = false;
+
+        if (!e.altKey)
+            this.isAltPressed = false;
     }
 
     /**
@@ -186,6 +211,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         this.keysPressed = {};
         this.isDragging = false;
         this.isAltPressed = false;
+        this.isShiftPressed = false;
         this.isPanning = false;
     }
 
@@ -194,22 +220,20 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      * @param e The mouse event.
      */
     private handleMouseDown(e: MouseEvent): void {
-        console.log(`Mouse position: (${e.offsetX}, ${e.offsetY}), button: ${e.button}, altKey: ${e.altKey}`);
-        if (e.altKey)
-            this.isAltPressed = true;
-
         if (e.altKey && e.button === 0 || e.button === 2) {
             this.isDragging = true;
             this.lastMouseX = e.offsetX;
             this.lastMouseY = e.offsetY;
             e.preventDefault();
         }
-
-        if (e.button === 1) {
+        else
+        if (e.button === 0) {
+            this.isScrolling = true;
             this.lastMouseX = e.offsetX;
             this.lastMouseY = e.offsetY;
             e.preventDefault();
         }
+
 
         // Using ObjectPicker plugin to pick objects in the scene when the left mouse button is clicked without Alt key.
         if (!e.altKey && e.button === 0) {
@@ -272,7 +296,11 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         this._cacheVector2.set(e.clientX, e.clientY);
         const viewportPosition = this.renderer.clientToViewport(this._cacheVector2);
 
-        if (objectPicker) {
+        if (this.isScrolling) {
+            console.log(`Scrolling chart by pixels: (${e.movementX}, ${e.movementY})`);
+            this._chart.scrollByPixels(e.movementX * 0.002, e.movementY * -0.002);
+        }
+        else if (objectPicker) {
             // Reset all hover states before picking to ensure only one bar is hovered.
             this.resetHoverStates();
 
@@ -314,6 +342,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         this.isPanning = false;
         this.isDragging = false;
         this.isAltPressed = false;
+        this.isScrolling = false;
     }
 
     /**
@@ -321,12 +350,25 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      * @param e The wheel event.
      */
     private handleWheel(e: WheelEvent): void {
-        e.preventDefault();
+        if (this.isShiftPressed) {
+            e.preventDefault();
 
-        const camera = this.camera;
+            // Changing chart zoom.
+            const zoomFactor = e.deltaY < 0 ? 2 : 0.5;
 
-        if (!camera)
-            return;
+            const newZoom = this._chart.zoom * zoomFactor;
 
+            // Zoom could be clamped to a reasonable range if desired, e.g.:
+            this._chart.zoom = Math.max(1 / 256, Math.min(newZoom, 1));
+        }
+        else {
+            // Moving camera forward/backward along its local Z-axis.
+            const camera = this.camera;
+            if (!camera)
+                return;
+
+            const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
+            camera.position.multiplyScalar(zoomFactor);
+        }
     }
 }

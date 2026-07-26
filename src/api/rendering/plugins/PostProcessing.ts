@@ -130,8 +130,10 @@ export class PostProcessing extends RendererPlugin<PostProcessingOptions>
       normalEdgeStrength: 3
     });
 
-    this.renderPassBokeh.enabled = true;
-    this.renderPassPixelate.enabled = true;
+    this.renderPassGTAO.enabled = false;
+    this.renderPassSSAA.enabled = true;
+    this.renderPassBokeh.enabled = false;
+    this.renderPassPixelate.enabled = false;
 
     if (this.rendererPass.renderTarget)
       this.effectComposer.setSize(

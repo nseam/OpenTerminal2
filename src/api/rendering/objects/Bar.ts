@@ -8,6 +8,11 @@ export class Bar
     public previousBar: Bar | null = null;
 
     /**
+     * The time of the bar in milliseconds since epoch.
+     */
+    public time_ms: number = 0;
+
+    /**
      * Open price.
      */
     public o: number = 0;
@@ -74,12 +79,14 @@ export class Bar
 
     /**
      * Sets the values of the bar.
+     * @param time_ms The time of the bar in milliseconds since epoch.
      * @param o Open price.
      * @param h High price.
      * @param l Low price.
      * @param c Close price.
-     */
-    public setValues(o: number, h: number, l: number, c: number): void {
+     */ 
+    public setValues(time_ms: number, o: number, h: number, l: number, c: number): void {
+        this.time_ms = time_ms;
         this.o = o;
         this.h = h;
         this.l = l;
