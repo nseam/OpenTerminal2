@@ -46,6 +46,9 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     // Whether the mouse is currently being dragged for chart scrolling.
     private isScrolling = false;
 
+    // Accumulated horizontal scroll velocity for smooth mouse-wheel deceleration.
+    private _scrollVelocity: number = 0;
+
     // Vector2 cache.
     private _cacheVector2: Gfx.Vector2 = new Gfx.Vector2();
 
@@ -94,9 +97,13 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      * @inheritdoc
      */
     public override update(renderPass: RendererRenderPass): void {
-        
-
-
+        // Apply smooth scroll: advance chart by current velocity then decay.
+        if (Math.abs(this._scrollVelocity) > 0.00001) {
+            this._chart.scrollByPixels(this._scrollVelocity, 0);
+            this._scrollVelocity *= 0.88; // exponential decay — tune for feel
+        } else {
+            this._scrollVelocity = 0;
+        }
 
     }
 
@@ -188,6 +195,29 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
 
         if (e.altKey)
             this.isAltPressed = true;
+
+        if (e.key === '-' || e.key === '+' || e.key === '=') {
+            // Changing chart zoom.
+            const zoomFactor = e.key === '+' || e.key === '=' ? 2 : 0.5;
+
+            const newZoom = this._chart.zoom * zoomFactor;
+
+            // Zoom could be clamped to a reasonable range if desired, e.g.:
+            this._chart.zoom = Math.max(1 / 256, Math.min(newZoom, 1));
+        }
+        else if (e.key === '0') {
+            this._chart.zoom = 1;
+        }
+        else if (e.key === 'Home') {
+            // Reseting camera position and rotation to default.
+            if (this.camera) {
+                // Centering camera on the chart but from the behind.
+                const bbox = this._chart.getBBox();
+                this.camera.position.set((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
+                this.camera.lookAt((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
+    
+            }
+        }
     }
 
     /**
@@ -298,7 +328,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
 
         if (this.isScrolling) {
             console.log(`Scrolling chart by pixels: (${e.movementX}, ${e.movementY})`);
-            this._chart.scrollByPixels(e.movementX * 0.002, e.movementY * -0.002);
+            this._chart.scrollByPixels(0, e.movementY * -0.002);
         }
         else if (objectPicker) {
             // Reset all hover states before picking to ensure only one bar is hovered.
@@ -350,25 +380,10 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      * @param e The wheel event.
      */
     private handleWheel(e: WheelEvent): void {
-        if (this.isShiftPressed) {
-            e.preventDefault();
-
-            // Changing chart zoom.
-            const zoomFactor = e.deltaY < 0 ? 2 : 0.5;
-
-            const newZoom = this._chart.zoom * zoomFactor;
-
-            // Zoom could be clamped to a reasonable range if desired, e.g.:
-            this._chart.zoom = Math.max(1 / 256, Math.min(newZoom, 1));
+        // Accumulate wheel delta into scroll velocity for smooth deceleration.
+        if (e.deltaY !== 0) {
+            this._scrollVelocity += e.deltaY * -0.001;
         }
-        else {
-            // Moving camera forward/backward along its local Z-axis.
-            const camera = this.camera;
-            if (!camera)
-                return;
-
-            const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
-            camera.position.multiplyScalar(zoomFactor);
-        }
+        e.preventDefault();
     }
 }

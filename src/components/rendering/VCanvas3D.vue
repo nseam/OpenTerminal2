@@ -39,6 +39,11 @@
     import { Chart } from '../../api/rendering/objects/Chart';
     import { Series } from '../../api/rendering/objects/Series';
 
+    const chart = new Chart(20, 0.05, 0.04);
+    const series = new Series();
+    chart.addSeries(series);
+    chart.setData(Chart.randomizeData());
+
     class IndicatorRunTest extends Test {
         async run(lib: LibModule): Promise<void> {
             lib.Tester.Init();
@@ -67,10 +72,9 @@
 
             // Retrieve all ungrouped (raw, bar-by-bar) indicator values.
             // Passing 0n for both parameters means: all available history, up to most recent bar.
-            const testerValues: TesterValues = lib.Tester.GetValues(BigInt(0), BigInt(0), 0, false);
+            const testerValues = lib.Tester.GetValues(BigInt(0), BigInt(0), 0, false);
 
-            console.log('Indicator values:', testerValues);
-
+            //chart.setData(testerValues?.timestep_based[0]!);
         }
     }
 
@@ -119,21 +123,7 @@
             //scene.add(new Grid(gridSize, gridSize / gridStep / 10, 0, 0x337733, 0x333333));
             //scene.add(new Grid(gridSize, gridSize / gridStep / 100, 0, 0x337733, 0x336699));
 
-            const chart = new Chart(20, 0.05, 0.04);
-            const series = new Series();
-
-            chart.addSeries(series);
-
-            chart.setData(Chart.randomizeData());
-
             scene.add(chart);
-
-            // Centering camera on the chart but from the behind.
-            const bbox = chart.getBBox();
-            camera.position.set((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
-            camera.lookAt((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
-            
-            
 
             // Create a plane and apply the generated texture to it.
             const planeGeometry = new Gfx.PlaneGeometry(1, 1)

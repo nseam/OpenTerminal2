@@ -87,29 +87,33 @@ export class ChartGrid extends Gfx.Object3D
         if (!this.positionBuffer) return;
 
         // Normalize horizontal shift to [0, chartWidth) so vertical lines wrap seamlessly.
-        const shiftX = chartWidth > 0 ? ((this.gridLinesShiftX % chartWidth) + chartWidth) % chartWidth : 0;
+        // Negate so grid lines scroll in the same direction as the bars.
+        const shiftX = chartWidth > 0 ? ((-this.gridLinesShiftX % chartWidth) + chartWidth) % chartWidth : 0;
+
+        // Normalize vertical shift to [0, chartHeight) so horizontal lines wrap seamlessly.
+        const shiftY = chartHeight > 0 ? ((-this.gridLinesShiftY % chartHeight) + chartHeight) % chartHeight : 0;
 
         // Always rewrite positions so scroll shifts are applied every frame.
         const arr = this.positionBuffer.array as Float32Array;
         let idx = 0;
 
-        // Left side — horizontal lines at fixed y positions (no vertical scroll).
+        // Left side — horizontal lines scrolled vertically.
         for (let i = 0; i <= numLinesVertical; i++) {
-            const y = bbox.min.y + chartHeight * (i / numLinesVertical);
+            const y = bbox.min.y + ((chartHeight * (i / numLinesVertical) + shiftY) % chartHeight);
             arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
             arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.max.z;
         }
 
-        // Right side — horizontal lines at fixed y positions.
+        // Right side — horizontal lines scrolled vertically.
         for (let i = 0; i <= numLinesVertical; i++) {
-            const y = bbox.min.y + chartHeight * (i / numLinesVertical);
+            const y = bbox.min.y + ((chartHeight * (i / numLinesVertical) + shiftY) % chartHeight);
             arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
             arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.max.z;
         }
 
-        // Front face — horizontal lines at fixed y positions.
+        // Front face — horizontal lines scrolled vertically.
         for (let i = 0; i <= numLinesVertical; i++) {
-            const y = bbox.min.y + chartHeight * (i / numLinesVertical);
+            const y = bbox.min.y + ((chartHeight * (i / numLinesVertical) + shiftY) % chartHeight);
             arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
             arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
         }

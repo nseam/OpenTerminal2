@@ -34,9 +34,6 @@ export class Chart extends Gfx.Object3D
     // The index of the first bar to be displayed in the chart. This will be used to scroll the chart when the user scrolls.
     public barsStartIndex: number = 0;
 
-    // Tracks accumulated pixel scroll distance for detecting when to shift data start index.
-    private _scrollAccumulator: number = 0;
-
     // The data for the chart, shared across all series.
     private _data: TesterValuesColumns | null = null;
 
@@ -50,6 +47,8 @@ export class Chart extends Gfx.Object3D
         // Update the grid and series to reflect the new zoom level.
         for (const series of this.series)
             series.setNumBarsDisplayed(this.numBars / this._zoom, this.barWidth, this.barSpacing);
+
+        this._refreshSeriesData();
     }
 
     public get numHorizontalGridLines(): number {
@@ -94,13 +93,16 @@ export class Chart extends Gfx.Object3D
     public setData(data: TesterValuesColumns): void {
         this._data = data;
         this._refreshSeriesData();
+        this.scrollByPixels(0, 0); // Refresh the chart to reflect the new data.
     }
 
     /**
      * Pushes the current data window (starting at barsStartIndex) to every series.
      */
     private _refreshSeriesData(): void {
-        if (this._data === null) return;
+        if (this._data === null)
+            return;
+
         for (const series of this.series)
             series.updateBarsFromData(this._data, this.barsStartIndex);
     }
@@ -160,12 +162,24 @@ export class Chart extends Gfx.Object3D
         let l: number | null = null;
         let c: number | null = null;
 
-        for (const series of this.series) {
-            for (const bar of series.bars) {
-                if (o === null || bar.o < o) o = bar.o;
-                if (h === null || bar.h > h) h = bar.h;
-                if (l === null || bar.l < l) l = bar.l;
-                if (c === null || bar.c > c) c = bar.c;
+        if (this._data !== null) {
+            // Scan the full dataset so the OHLC range covers all bars, not just the visible window.
+            for (const entry of this._data.values) {
+                const ohlc = entry.GetValues4();
+                if (o === null || ohlc.val1 < o) o = ohlc.val1;
+                if (h === null || ohlc.val2 > h) h = ohlc.val2;
+                if (l === null || ohlc.val3 < l) l = ohlc.val3;
+                if (c === null || ohlc.val4 > c) c = ohlc.val4;
+            }
+        } else {
+            // Fallback: collect from the currently visible bar objects.
+            for (const series of this.series) {
+                for (const bar of series.bars) {
+                    if (o === null || bar.o < o) o = bar.o;
+                    if (h === null || bar.h > h) h = bar.h;
+                    if (l === null || bar.l < l) l = bar.l;
+                    if (c === null || bar.c > c) c = bar.c;
+                }
             }
         }
 
@@ -179,15 +193,18 @@ export class Chart extends Gfx.Object3D
      */
     public getBBox(): Gfx.Box3 {
         const bbox = new Gfx.Box3();
-        // Expanding front/back.
+
+        const ohlc = this.getOHLC();
+
+        // Front/back depth.
         bbox.expandByPoint(new Gfx.Vector3(0, 0, -0.5));
-        bbox.expandByPoint(new Gfx.Vector3(0, 0, 0.1));
+        bbox.expandByPoint(new Gfx.Vector3(0, 0,  0.1));
 
-        // Expanding up/down.
-        bbox.expandByPoint(new Gfx.Vector3(0, 0.3, 0));
-        bbox.expandByPoint(new Gfx.Vector3(0, -0.3, 0));
+        // Vertical extent derived from the full price range of the data.
+        bbox.expandByPoint(new Gfx.Vector3(0, ohlc.l, 0));
+        bbox.expandByPoint(new Gfx.Vector3(0, ohlc.h, 0));
 
-        // Expanding on sides — chart is centered at x=0 so bars and grid lines align.
+        // Horizontal extent — chart is centered at x=0 so bars and grid lines align.
         const chartWidth = this.numBars * (this.barWidth + this.barSpacing);
         bbox.expandByPoint(new Gfx.Vector3(-chartWidth / 2, 0, 0));
         bbox.expandByPoint(new Gfx.Vector3( chartWidth / 2, 0, 0));
@@ -201,49 +218,34 @@ export class Chart extends Gfx.Object3D
      * 
      * @param deltaX The number of pixels to scroll horizontally.
      */
-    public scrollByPixels(deltaX: number, _deltaY: number = 0): void {
-        // Accumulate pixel delta for threshold detection.
-        this._scrollAccumulator += deltaX;
+    public scrollByPixels(deltaX: number, deltaY: number = 0): void {
+        // gridLinesShiftX/Y are the single accumulated scroll values (world units).
+        this.grid.gridLinesShiftX -= deltaX;
+        this.grid.gridLinesShiftY -= deltaY;
 
-        // Shift grid lines proportionally to the scroll amount (horizontal only).
-        this.grid.gridLinesShiftX += deltaX;
+        const barStep         = this.barWidth + this.barSpacing;
+        const effectiveStep   = barStep * this._zoom;   // bar width in world units at current zoom
+        const chartWidth      = this.numBars * barStep;
 
-        // Shift all series visually by the same amount as the grid lines.
-        // Chart is centered at x=0, so the base offset is -chartWidth/2.
-        const chartWidth = this.numBars * (this.barWidth + this.barSpacing);
-        const shiftX = chartWidth > 0
-            ? ((this.grid.gridLinesShiftX % chartWidth) + chartWidth) % chartWidth
-            : 0;
-        for (const series of this.series)
-            series.position.x = shiftX - chartWidth / 2;
+        // Clamp gridLinesShiftX so it cannot scroll past the data boundaries.
+        const maxIndex = this._data !== null ? Math.max(0, this._data.values.length - 1) : 0;
+        if (this.grid.gridLinesShiftX < 0)
+            this.grid.gridLinesShiftX = 0;
+        if (this.grid.gridLinesShiftX > maxIndex * effectiveStep)
+            this.grid.gridLinesShiftX = maxIndex * effectiveStep;
 
-        // Calculate how many whole bars the accumulator has crossed.
-        const barStep = this.barWidth + this.barSpacing;
-        const barsToScroll = Math.floor(Math.abs(this._scrollAccumulator) / (barStep * this._zoom));
+        // Derive barsStartIndex from total scroll: more scroll = higher index = newer data.
+        this.barsStartIndex = Math.min(maxIndex, Math.floor(this.grid.gridLinesShiftX / effectiveStep));
 
-        if (barsToScroll > 0) {
-            // Reversed direction: positive deltaX (drag right) → barsStartIndex decreases
-            // (scrolling toward older/earlier data).
-            this.barsStartIndex -= barsToScroll * Math.sign(deltaX);
-
-            // Clamp to valid range.
-            if (this.barsStartIndex < 0) {
-                this.barsStartIndex = 0;
-                this._scrollAccumulator = 0;
-            }
-
-            // Clamp upper bound to available data length.
-            if (this._data !== null && this.barsStartIndex > this._data.values.length - 1) {
-                this.barsStartIndex = Math.max(0, this._data.values.length - 1);
-                this._scrollAccumulator = 0;
-            }
-
-            // Drain the accumulator by the amount consumed — always subtract in the
-            // direction of scroll so the accumulator converges toward zero.
-            this._scrollAccumulator -= Math.sign(deltaX) * barsToScroll * barStep * this._zoom;
+        // Sub-bar fractional visual offset: bars slide LEFT as gridLinesShiftX grows
+        // (drag right), so new data enters from the right edge on each barStep wrap.
+        const visualOffset = this.grid.gridLinesShiftX % effectiveStep;
+        
+        for (const series of this.series) {
+            series.position.x = -chartWidth / 2 - visualOffset;
+            series.position.y = -this.grid.gridLinesShiftY;
         }
 
-        // Update all series with the new data window.
         this._refreshSeriesData();
     }
 
@@ -264,16 +266,22 @@ export class Chart extends Gfx.Object3D
     public static randomizeData(): TesterValuesColumns {
         const COUNT = 10_000;
         const startTimeSec = Math.floor(Date.now() / 1000);
+        const MIN_PRICE = 0.1;
+        const MAX_PRICE = 0.7;
 
         const values: IndicatorDataEntry[] = [];
-        let prevClose = 0.1 + Math.random() * 0.2;
+        let prevClose = MIN_PRICE + Math.random() * (MAX_PRICE - MIN_PRICE);
 
         for (let i = 0; i < COUNT; i++) {
             const timestamp = BigInt(startTimeSec + i * 60);
             const open  = prevClose;
             const wick  = Math.random() * 0.005;          // max wick extent
-            const body  = (Math.random() - 0.5) * 0.11;  // body direction & size
-            const close = open + body;
+            const body  = (Math.random() - 0.5) * 0.1;  // body direction & size
+            let close = open + body;
+            
+            // Clamp close to stay within [MIN_PRICE, MAX_PRICE]
+            close = Math.max(MIN_PRICE, Math.min(MAX_PRICE, close));
+            
             const high  = Math.max(open, close) + wick;
             const low   = Math.min(open, close) - wick;
 
