@@ -26,7 +26,7 @@ export class ChartGrid extends Gfx.Object3D
     /**
      * Cube that represents the bounding box of the chart.
      */
-    public gridCube: Gfx.Mesh = new Gfx.Mesh(new Gfx.BoxGeometry(1, 1, 1), new Gfx.MeshBasicMaterial({ color: 0x0d0d0d, side: Gfx.BackSide }));
+    public gridCube: Gfx.Mesh = new Gfx.Mesh(new Gfx.BoxGeometry(1, 1, 1), new Gfx.MeshBasicMaterial({ color: 0x000000, side: Gfx.BackSide }));
 
     /** The shift of the grid lines in the x-axis. This will be used to scroll the grid lines when the chart is scrolled. */
     public gridLinesShiftX: number = 0;
@@ -71,8 +71,8 @@ export class ChartGrid extends Gfx.Object3D
         // Reallocate the GPU buffer only when line counts change.
         if (numLinesVertical !== this.numGridLinesVertical || numLinesHorizontal !== this.numGridLinesHorizontal) {
             const numLinePairsV  = numLinesVertical   + 1;
-            const numLinePairsH  = numLinesHorizontal + 1;
-            const totalLinePairs = 3 * numLinePairsV + 2 * numLinePairsH + 4;
+            const numLinePairsH  = numLinesHorizontal + 2;
+            const totalLinePairs = 3 * numLinePairsV + 2 * numLinePairsH + 5;
             const totalValues    = totalLinePairs * 6;
 
             if (!this.positionBuffer || totalValues > this.positionBuffer.array.length) {
@@ -84,11 +84,17 @@ export class ChartGrid extends Gfx.Object3D
             this.numGridLinesHorizontal = numLinesHorizontal;
         }
 
-        if (!this.positionBuffer) return;
+        if (!this.positionBuffer)
+            return;
+
+        // Use a slight Z offset to prevent depth fighting between grid lines and cube faces.
+        const GRID_Z_OFFSET = 0.0001;
 
         // Normalize horizontal shift to [0, chartWidth) so vertical lines wrap seamlessly.
         // Negate so grid lines scroll in the same direction as the bars.
-        const shiftX = chartWidth > 0 ? ((-this.gridLinesShiftX % chartWidth) + chartWidth) % chartWidth : 0;
+        let shiftX = chartWidth > 0 ? ((-this.gridLinesShiftX % chartWidth) + chartWidth) % chartWidth : 0;
+
+        console.log(`Normalized horizontal shift: ${shiftX}`);
 
         // Normalize vertical shift to [0, chartHeight) so horizontal lines wrap seamlessly.
         const shiftY = chartHeight > 0 ? ((-this.gridLinesShiftY % chartHeight) + chartHeight) % chartHeight : 0;
@@ -104,12 +110,20 @@ export class ChartGrid extends Gfx.Object3D
             arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.max.z;
         }
 
+        // Left side — additional horizontal line at the very top edge of the chart.
+        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
+        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
+
         // Right side — horizontal lines scrolled vertically.
         for (let i = 0; i <= numLinesVertical; i++) {
             const y = bbox.min.y + ((chartHeight * (i / numLinesVertical) + shiftY) % chartHeight);
             arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
             arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.max.z;
         }
+
+        // Right side — additional horizontal line at the very top edge of the chart.
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
 
         // Front face — horizontal lines scrolled vertically.
         for (let i = 0; i <= numLinesVertical; i++) {
@@ -118,6 +132,10 @@ export class ChartGrid extends Gfx.Object3D
             arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
         }
 
+        // Additional horizontal line at the very top edge of the chart.
+        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
+
         // Front face — vertical lines at varying x, scrolled horizontally.
         for (let i = 0; i <= numLinesHorizontal; i++) {
             const x = bbox.min.x + ((chartWidth * (i / numLinesHorizontal) + shiftX) % chartWidth);
@@ -125,36 +143,43 @@ export class ChartGrid extends Gfx.Object3D
             arr[idx++] = x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
         }
 
-        // Bottom face — vertical lines at varying x, scrolled horizontally.
-        for (let i = 0; i <= numLinesHorizontal; i++) {
+        // Back face (floor) — depth lines using the same x positions as the front vertical lines,
+        // scrolled identically. Lines that land on the left or right wall are suppressed.
+        for (let i = 0; i < numLinesHorizontal; i++) {
             const x = bbox.min.x + ((chartWidth * (i / numLinesHorizontal) + shiftX) % chartWidth);
+            if (x <= bbox.min.x || x >= bbox.max.x) continue;
             arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
             arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
         }
 
-        // Back/top corner edges (static — not scrolled).
+        // Back/top corner edges (static structural bounds, not grid lines).
         arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
         arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
 
         arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
         arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-
         arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
         arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
 
         arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
         arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
+
+        // Drawing line at the right/back edge.
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
 
         this.positionBuffer.needsUpdate = true;
         this.gridLinesVertical.geometry.setDrawRange(0, idx / 3);
 
         // Positioning the grid cube to match the chart's bounding box.
-        const padding = 0.00001;
+        const padding = 0.0001;
+
         this.gridCube.position.set(
             (bbox.min.x + bbox.max.x) / 2,
             (bbox.min.y + bbox.max.y) / 2,
             (bbox.min.z + bbox.max.z) / 2
         );
+
         this.gridCube.scale.set(
             chartWidth  + padding,
             chartHeight + padding,

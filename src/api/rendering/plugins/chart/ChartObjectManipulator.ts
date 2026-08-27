@@ -55,6 +55,9 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     // The chart object that this manipulator is currently interacting with.
     private _chart: Chart;
 
+    // Global bar index (barsStartIndex + series-local index) of the selected bar, or -1 if none.
+    private _selectedGlobalBarIndex: number = -1;
+
     /**
      * Creates a new ChartObjectManipulator plugin.
      * @param rendererPass The render pass that this plugin is attached to.
@@ -65,6 +68,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         super(rendererPass, options);
 
         this._chart = options.chart;
+        this._chart.onDataSet = () => this._centerCameraOnChart();
     }
 
     /**
@@ -78,6 +82,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         window.addEventListener('mouseup', this.handleMouseUp.bind(this));
         window.addEventListener('blur', this.handleBlur.bind(this));
         canvas.addEventListener('wheel', this.handleWheel.bind(this), { passive: false });
+        this._centerCameraOnChart();
     }
 
     /**
@@ -100,9 +105,11 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         // Apply smooth scroll: advance chart by current velocity then decay.
         if (Math.abs(this._scrollVelocity) > 0.00001) {
             this._chart.scrollByPixels(this._scrollVelocity, 0);
-            this._scrollVelocity *= 0.88; // exponential decay — tune for feel
-        } else {
+            this._scrollVelocity *= 0.90;
+            this._restoreSelection();
+        } else if (this._scrollVelocity !== 0) {
             this._scrollVelocity = 0;
+            this._chart.snapToNearestBar();
         }
 
     }
@@ -117,6 +124,27 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      * Resets all bar hover and selection states across every series in the scene.
      * Must be called before any pick operation to ensure only one bar is highlighted at a time.
      */
+    private _centerCameraOnChart(): void {
+        if (!this.camera) return;
+        const bbox = this._chart.getBBox();
+        this.camera.position.set((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
+        this.camera.lookAt((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
+    }
+
+    // Re-applies _selectedGlobalBarIndex to the current bar window after a scroll.
+    private _restoreSelection(): void {
+        for (const child of this.scene?.children ?? []) {
+            if (!(child instanceof Chart)) continue;
+            for (const series of child.series) {
+                for (let b = 0; b < series.getNumBars(); b++) {
+                    const globalIdx = child.barsStartIndex + b;
+                    series.bars[b].selected = (globalIdx === this._selectedGlobalBarIndex);
+                }
+                series.updateColors();
+            }
+        }
+    }
+
     private resetAllBarStates(): void {
         for (const child of this.scene?.children ?? []) {
             if (child instanceof Series) {
@@ -283,19 +311,28 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
 
                 if (intersects && intersects.length > 0) {
                     for (const hit of intersects) {
-                        // Only accept intersections from an InstancedMesh with a valid instanceId.
-                        if (!(hit.object instanceof Gfx.InstancedMesh)) continue;
-                        const instanceId = hit.instanceId;
-                        if (instanceId === undefined || instanceId < 0) continue;
+                        if (!(hit.object instanceof Gfx.InstancedMesh))
+                            continue;
 
-                        // Walk up to find parent Series.
+                        const instanceId = hit.instanceId;
+
+                        if (instanceId === undefined || instanceId < 0)
+                            continue;
+
                         let parent: Gfx.Object3D | null = hit.object;
+
                         while (parent) {
                             if (parent instanceof Series) {
                                 const bar = parent.bars[instanceId];
                                 if (bar) {
-                                    // Toggle selection on the clicked bar only.
-                                    bar.selected = !bar.selected;
+                                    const globalIdx = this._chart.barsStartIndex + instanceId;
+                                    if (bar.selected) {
+                                        bar.selected = false;
+                                        this._selectedGlobalBarIndex = -1;
+                                    } else {
+                                        bar.selected = true;
+                                        this._selectedGlobalBarIndex = globalIdx;
+                                    }
                                     parent.updateColors();
                                 }
                                 return;
@@ -329,6 +366,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         if (this.isScrolling) {
             console.log(`Scrolling chart by pixels: (${e.movementX}, ${e.movementY})`);
             this._chart.scrollByPixels(0, e.movementY * -0.002);
+            this._restoreSelection();
         }
         else if (objectPicker) {
             // Reset all hover states before picking to ensure only one bar is hovered.
@@ -380,7 +418,6 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      * @param e The wheel event.
      */
     private handleWheel(e: WheelEvent): void {
-        // Accumulate wheel delta into scroll velocity for smooth deceleration.
         if (e.deltaY !== 0) {
             this._scrollVelocity += e.deltaY * -0.001;
         }

@@ -30,8 +30,11 @@ export class Series extends Gfx.Object3D
     /** Single InstancedMesh that renders all bar boxes. */
     private _instancedMesh: Gfx.InstancedMesh | null = null;
 
-    /** Shared material for the instanced bars. */
-    private _boxMaterial = new Gfx.MeshLambertMaterial();
+    /** Shared material for the instanced bars — transparent so edge-fade uses alpha. */
+    private _boxMaterial = Series._makeBoxMaterial();
+
+    /** Per-instance opacity values written to the 'instanceOpacity' geometry attribute. */
+    private _instanceOpacityArr: Float32Array | null = null;
 
     /** BufferGeometry holding all vertical lines as LineSegments pairs. */
     private _lineGeometry: Gfx.BufferGeometry | null = null;
@@ -42,8 +45,14 @@ export class Series extends Gfx.Object3D
     /** Material for the line mesh (tracked for proper disposal). */
     private _lineMaterial: Gfx.LineBasicMaterial | null = null;
 
+    /** Per-vertex (2 per bar) opacity values written to the 'aOpacity' geometry attribute. */
+    private _lineOpacityArr: Float32Array | null = null;
+
     /** Temporary color reused when setting instance colors. */
     private _tempColor = new Gfx.Color();
+
+    /** Number of bar-widths at each edge over which bars fade in/out. */
+    private static readonly FADE_BARS = 3;
 
     /** The current bar width (used for scale). */
     private _barWidth: number = 0.1;
@@ -67,16 +76,49 @@ export class Series extends Gfx.Object3D
         return this._data;
     }
 
-    /**
-     * Gets the current data set for this series.
-     */
-    public getData(): TesterValuesColumns[] {
-        return this._data;
-    }
-
     /** Constructor. */
     public constructor() {
         super();
+    }
+
+    /** Creates the shared box material with per-instance alpha support via shader injection. */
+    private static _makeBoxMaterial(): Gfx.MeshLambertMaterial {
+        const mat = new Gfx.MeshLambertMaterial({ transparent: true });
+        mat.onBeforeCompile = (shader) => {
+            shader.vertexShader =
+                'attribute float instanceOpacity;\nvarying float vInstanceOpacity;\n' +
+                shader.vertexShader.replace(
+                    'void main() {',
+                    'void main() {\n\tvInstanceOpacity = instanceOpacity;'
+                );
+            shader.fragmentShader =
+                'varying float vInstanceOpacity;\n' +
+                shader.fragmentShader.replace(
+                    '#include <premultiplied_alpha_fragment>',
+                    'gl_FragColor.a *= vInstanceOpacity;\n#include <premultiplied_alpha_fragment>'
+                );
+        };
+        return mat;
+    }
+
+    /** Creates a line material with per-vertex alpha support via shader injection. */
+    private static _makeLineMaterial(): Gfx.LineBasicMaterial {
+        const mat = new Gfx.LineBasicMaterial({ vertexColors: true, transparent: true });
+        mat.onBeforeCompile = (shader) => {
+            shader.vertexShader =
+                'attribute float aOpacity;\nvarying float vOpacity;\n' +
+                shader.vertexShader.replace(
+                    'void main() {',
+                    'void main() {\n\tvOpacity = aOpacity;'
+                );
+            shader.fragmentShader =
+                'varying float vOpacity;\n' +
+                shader.fragmentShader.replace(
+                    '#include <premultiplied_alpha_fragment>',
+                    'gl_FragColor.a *= vOpacity;\n#include <premultiplied_alpha_fragment>'
+                );
+        };
+        return mat;
     }
 
     /**
@@ -145,12 +187,10 @@ export class Series extends Gfx.Object3D
      */
     private _setInstancedMeshCapacity(count: number): void {
         if (this._instancedMesh === null) {
-            // First creation: build the mesh and attach to scene graph.
             this._instancedMesh = new Gfx.InstancedMesh(this._boxGeometry, this._boxMaterial, count);
             this._instancedMesh.instanceMatrix.setUsage(Gfx.DynamicDrawUsage);
             this.add(this._instancedMesh);
         } else if (count > this._allocatedCapacityMesh) {
-            // Buffer too small — must grow. Copy existing instance data into a new larger mesh.
             const oldMesh = this._instancedMesh;
             const copyCount = this._allocatedCapacityMesh;
 
@@ -162,7 +202,7 @@ export class Series extends Gfx.Object3D
                 oldMesh.getMatrixAt(i, targetMatrix);
                 this._instancedMesh.setMatrixAt(i, targetMatrix);
                 if (oldMesh.instanceColor && this._instancedMesh.instanceColor) {
-                    oldMesh.getColorAt(i, this._tempColor); // reuse — no per-instance allocation
+                    oldMesh.getColorAt(i, this._tempColor);
                     this._instancedMesh.setColorAt(i, this._tempColor);
                 }
             }
@@ -176,7 +216,16 @@ export class Series extends Gfx.Object3D
 
             this._allocatedCapacityMesh = count;
         }
-        // Always clamp the draw count to the requested number — no reallocation needed.
+
+        // Ensure per-instance opacity attribute is large enough and attached to the geometry.
+        if (!this._instanceOpacityArr || this._instanceOpacityArr.length < count) {
+            this._instanceOpacityArr = new Float32Array(count).fill(1);
+            this._boxGeometry.setAttribute(
+                'instanceOpacity',
+                new Gfx.InstancedBufferAttribute(this._instanceOpacityArr, 1)
+            );
+        }
+
         this._instancedMesh.count = count;
     }
 
@@ -205,12 +254,12 @@ export class Series extends Gfx.Object3D
             this._lineGeometry = new Gfx.BufferGeometry();
             const posAttr = new Gfx.BufferAttribute(new Float32Array(count * 6), 3);
             const colAttr = new Gfx.BufferAttribute(new Float32Array(count * 6), 3);
-            //posAttr.setUsage(Gfx.DynamicDrawUsage);
-            //colAttr.setUsage(Gfx.DynamicDrawUsage);
+            this._lineOpacityArr = new Float32Array(count * 2).fill(1);
             this._lineGeometry.setAttribute('position', posAttr);
             this._lineGeometry.setAttribute('color', colAttr);
+            this._lineGeometry.setAttribute('aOpacity', new Gfx.BufferAttribute(this._lineOpacityArr, 1));
 
-            this._lineMaterial = new Gfx.LineBasicMaterial({ vertexColors: true });
+            this._lineMaterial = Series._makeLineMaterial();
             this._lineMesh = new Gfx.LineSegments(this._lineGeometry, this._lineMaterial);
             this.add(this._lineMesh);
 
@@ -260,8 +309,24 @@ export class Series extends Gfx.Object3D
     public layoutBars(barWidth: number = 0.1, spacing: number = 0.1): void {
         for (let i = 0; i < this._activeBarCount; i++) {
             const bar = this.bars[i];
-            bar.posX = i * (barWidth + spacing);
+            bar.posX = (i + 1) * (barWidth + spacing);
         }
+    }
+
+    /**
+     * Returns a [0..1] fade factor for a bar at the given series-local x,
+     * fading to 0 near the chart's left and right edges.
+     */
+    private _edgeFade(barLocalX: number): number {
+        const chart = this.parent instanceof Chart ? this.parent as Chart : null;
+        if (!chart) return 1;
+        const unzoomedStep = chart.barWidth + chart.barSpacing;
+        const halfW       = chart.numBars * unzoomedStep / 2;
+        const fadeZone    = (this._barWidth + this._barSpacing) * Series.FADE_BARS;
+        const barWorldX   = this.position.x + barLocalX;
+        const leftFade    = Math.max(0, Math.min(1, (barWorldX - (-halfW)) / fadeZone));
+        const rightFade   = Math.max(0, Math.min(1, (halfW  - barWorldX)  / fadeZone));
+        return Math.min(leftFade, rightFade);
     }
 
     /**
@@ -272,6 +337,7 @@ export class Series extends Gfx.Object3D
             return;
 
         const count = this._activeBarCount;
+        const opacityAttr = this._boxGeometry.getAttribute('instanceOpacity') as Gfx.InstancedBufferAttribute | null;
 
         for (let i = 0; i < count; i++) {
             const bar = this.bars[i];
@@ -282,13 +348,15 @@ export class Series extends Gfx.Object3D
             const dc = bar.displayColor;
             this._tempColor.set(dc.r, dc.g, dc.b);
             this._instancedMesh.setColorAt(i, this._tempColor);
+
+            if (opacityAttr) opacityAttr.array[i] = this._edgeFade(bar.posX);
         }
 
         this._instancedMesh.instanceMatrix.needsUpdate = true;
         if (this._instancedMesh.instanceColor)
             this._instancedMesh.instanceColor.needsUpdate = true;
+        if (opacityAttr) opacityAttr.needsUpdate = true;
 
-        // Clamp draw range to actual bar count.
         this._instancedMesh.count = count;
     }
 
@@ -300,28 +368,33 @@ export class Series extends Gfx.Object3D
             return;
 
         const positions = this._lineGeometry.attributes.position.array as Float32Array;
-        const colors = this._lineGeometry.attributes.color.array as Float32Array;
+        const colors    = this._lineGeometry.attributes.color.array as Float32Array;
+        const opacities = this._lineGeometry.attributes.aOpacity?.array as Float32Array | undefined;
         const count = this._activeBarCount;
 
         for (let i = 0; i < count; i++) {
-            const bar = this.bars[i];
-            const base = i * 6; // 3 coords × 2 vertices
+            const bar  = this.bars[i];
+            const base = i * 6;
             positions[base + 0] = bar.posX; positions[base + 1] = bar.h; positions[base + 2] = 0;
             positions[base + 3] = bar.posX; positions[base + 4] = bar.l; positions[base + 5] = 0;
 
-            // Color the wick the same as the bar body.
-            const dc = bar.displayColor;
-            this._tempColor.set(dc.r, dc.g, dc.b);
-            // LineSegments uses vertex colors — assign to both vertices of each segment.
-            const cBase = (i * 6); // 3 RGB × 2 verts
+            const dc    = bar.displayColor;
+            const cBase = i * 6;
             colors[cBase + 0] = dc.r; colors[cBase + 1] = dc.g; colors[cBase + 2] = dc.b;
             colors[cBase + 3] = dc.r; colors[cBase + 4] = dc.g; colors[cBase + 5] = dc.b;
+
+            if (opacities) {
+                const fade = this._edgeFade(bar.posX);
+                opacities[i * 2]     = fade;
+                opacities[i * 2 + 1] = fade;
+            }
         }
 
         this._lineGeometry.attributes.position.needsUpdate = true;
-        this._lineGeometry.attributes.color.needsUpdate = true;
+        this._lineGeometry.attributes.color.needsUpdate    = true;
+        if (opacities) (this._lineGeometry.attributes.aOpacity as Gfx.BufferAttribute).needsUpdate = true;
 
-        this._lineGeometry.setDrawRange(0, count * 2); // 2 vertices per line segment
+        this._lineGeometry.setDrawRange(0, count * 2);
     }
 
     /**
@@ -347,14 +420,12 @@ export class Series extends Gfx.Object3D
     public updateBarsFromData(data: TesterValuesColumns, startIndex: number = 0): void {
         const date = new Date();
 
-        console.log(`Updating bars from data starting at index ${startIndex}. Data length: ${data.values.length}, Active bars: ${this._activeBarCount}`);
-
         for (let i = 0; i < this._activeBarCount; i++) {
             const bar = this.bars[i];
             if (i + startIndex < data.values.length) {
                 const row = data.values[i + startIndex];
-                const ohlc = row.GetValues4();
-                bar.setValues(date.getTime(), ohlc.val1, ohlc.val2, ohlc.val3, ohlc.val4);
+                const ohlc = row.values;
+                bar.setValues(date.getTime(), ohlc[0], ohlc[1], ohlc[2], ohlc[3]);
             } else {
                 // If there's no data for this bar, set it to zero values.
                 bar.setValues(date.getTime(), 0, 0, 0, 0);
@@ -385,14 +456,19 @@ export class Series extends Gfx.Object3D
         if (!this._instancedMesh) return;
 
         const count = this._activeBarCount;
+        const opacityAttr = this._boxGeometry.getAttribute('instanceOpacity') as Gfx.InstancedBufferAttribute | null;
+
         for (let i = 0; i < count; i++) {
-            const dc = this.bars[i].displayColor;
+            const bar = this.bars[i];
+            const dc = bar.displayColor;
             this._tempColor.set(dc.r, dc.g, dc.b);
             this._instancedMesh.setColorAt(i, this._tempColor);
+            if (opacityAttr) opacityAttr.array[i] = this._edgeFade(bar.posX);
         }
 
         if (this._instancedMesh.instanceColor)
             this._instancedMesh.instanceColor.needsUpdate = true;
+        if (opacityAttr) opacityAttr.needsUpdate = true;
 
         // Also update line colors.
         this.updateLines();

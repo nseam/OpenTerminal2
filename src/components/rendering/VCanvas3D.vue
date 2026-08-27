@@ -36,6 +36,7 @@
     import { TesterValues } from 'fx31337-wasm/lib/types/TesterValues.js';
     import { Bar } from '../../api/rendering/objects/Bar';
     import { ChartObjectManipulator } from '../../api/rendering/plugins/chart/ChartObjectManipulator';
+    import { ChartGridLabelsPlugin } from '../../api/rendering/plugins/chart/ChartGridLabelsPlugin';
     import { Chart } from '../../api/rendering/objects/Chart';
     import { Series } from '../../api/rendering/objects/Series';
 
@@ -61,8 +62,13 @@
             appliedPriceM1.SetName('Applied Price M1');
             appliedPriceM1.SetSource(tfM1);
 
-            lib.Tester.Add(rsiM1);
+            const ohlcM1 = new lib.indicators.OHLC({ appliedPrice: lib.ap.close, period: 0, shift: 0 });
+            ohlcM1.SetName('OHLC M1');
+            ohlcM1.SetSource(tfM1);
+
+            //lib.Tester.Add(rsiM1);
             //lib.Tester.Add(appliedPriceM1);
+            lib.Tester.Add(ohlcM1);
 
             lib.Tester.FeedTickProvider(ticker);
 
@@ -75,6 +81,8 @@
             const testerValues = lib.Tester.GetValues(BigInt(0), BigInt(0), 0, false);
 
             //chart.setData(testerValues?.timestep_based[0]!);
+
+            console.log(testerValues);
         }
     }
 
@@ -137,7 +145,7 @@
             plane.scale.set(1, 1, 1);
             //scene.add(plane)
 
-            scene.background = new Gfx.Color(0x171717);
+            scene.background = new Gfx.Color(0x000000);
 
             const rendererPass = this.renderer.addRenderPass({
                 name: 'main',
@@ -158,6 +166,9 @@
 
             rendererPass.addPlugin(ObjectPicker);
             rendererPass.addPlugin(ChartObjectManipulator, {
+                chart: chart,
+            });
+            rendererPass.addPlugin(ChartGridLabelsPlugin, {
                 chart: chart,
             });
             rendererPass.addPlugin(CameraMovement);

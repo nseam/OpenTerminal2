@@ -37,6 +37,9 @@ export class Chart extends Gfx.Object3D
     // The data for the chart, shared across all series.
     private _data: TesterValuesColumns | null = null;
 
+    // Called after new data is loaded so external code (e.g. plugins) can react.
+    public onDataSet?: () => void;
+
     public get zoom(): number {
         return this._zoom;
     }
@@ -94,6 +97,7 @@ export class Chart extends Gfx.Object3D
         this._data = data;
         this._refreshSeriesData();
         this.scrollByPixels(0, 0); // Refresh the chart to reflect the new data.
+        this.onDataSet?.();
     }
 
     /**
@@ -165,11 +169,11 @@ export class Chart extends Gfx.Object3D
         if (this._data !== null) {
             // Scan the full dataset so the OHLC range covers all bars, not just the visible window.
             for (const entry of this._data.values) {
-                const ohlc = entry.GetValues4();
-                if (o === null || ohlc.val1 < o) o = ohlc.val1;
-                if (h === null || ohlc.val2 > h) h = ohlc.val2;
-                if (l === null || ohlc.val3 < l) l = ohlc.val3;
-                if (c === null || ohlc.val4 > c) c = ohlc.val4;
+                const ohlc = entry.values;
+                if (o === null || ohlc[0] < o) o = ohlc[0];
+                if (h === null || ohlc[1] > h) h = ohlc[1];
+                if (l === null || ohlc[2] < l) l = ohlc[2];
+                if (c === null || ohlc[3] > c) c = ohlc[3];
             }
         } else {
             // Fallback: collect from the currently visible bar objects.
@@ -219,20 +223,24 @@ export class Chart extends Gfx.Object3D
      * @param deltaX The number of pixels to scroll horizontally.
      */
     public scrollByPixels(deltaX: number, deltaY: number = 0): void {
+        const barStep = this.barWidth + this.barSpacing;
+
         // gridLinesShiftX/Y are the single accumulated scroll values (world units).
         this.grid.gridLinesShiftX -= deltaX;
         this.grid.gridLinesShiftY -= deltaY;
 
-        const barStep         = this.barWidth + this.barSpacing;
         const effectiveStep   = barStep * this._zoom;   // bar width in world units at current zoom
         const chartWidth      = this.numBars * barStep;
 
-        // Clamp gridLinesShiftX so it cannot scroll past the data boundaries.
-        const maxIndex = this._data !== null ? Math.max(0, this._data.values.length - 1) : 0;
+        // Clamp gridLinesShiftX so the last bar cannot scroll past the right edge.
+        const totalBars  = this._data !== null ? this._data.values.length : 0;
+        const barsVisible = this.numBars / this._zoom;
+        const maxIndex   = Math.max(0, totalBars - 1);
+        const maxStartIndex = Math.max(0, totalBars - barsVisible);
         if (this.grid.gridLinesShiftX < 0)
             this.grid.gridLinesShiftX = 0;
-        if (this.grid.gridLinesShiftX > maxIndex * effectiveStep)
-            this.grid.gridLinesShiftX = maxIndex * effectiveStep;
+        if (this.grid.gridLinesShiftX > maxStartIndex * effectiveStep)
+            this.grid.gridLinesShiftX = maxStartIndex * effectiveStep;
 
         // Derive barsStartIndex from total scroll: more scroll = higher index = newer data.
         this.barsStartIndex = Math.min(maxIndex, Math.floor(this.grid.gridLinesShiftX / effectiveStep));
@@ -246,6 +254,31 @@ export class Chart extends Gfx.Object3D
             series.position.y = -this.grid.gridLinesShiftY;
         }
 
+        this._refreshSeriesData();
+    }
+
+    /**
+     * Snaps gridLinesShiftX to the nearest zoom-1 bar boundary.
+     */
+    public snapToNearestBar(): void {
+        const barStep       = this.barWidth + this.barSpacing;
+        const effectiveStep = barStep * this._zoom;
+        const totalBars     = this._data !== null ? this._data.values.length : 0;
+        const barsVisible   = this.numBars / this._zoom;
+        const maxStartIndex = Math.max(0, totalBars - barsVisible);
+
+        // Floor to the current zoom-1 bar boundary to avoid snapping forward in the scroll direction.
+        const snapped = Math.floor(this.grid.gridLinesShiftX / barStep) * barStep;
+        this.grid.gridLinesShiftX = Math.max(0, Math.min(snapped, maxStartIndex * effectiveStep));
+
+        const maxIndex = Math.max(0, totalBars - 1);
+        this.barsStartIndex = Math.min(maxIndex, Math.floor(this.grid.gridLinesShiftX / effectiveStep));
+        const visualOffset = this.grid.gridLinesShiftX % effectiveStep;
+        const chartWidth   = this.numBars * barStep;
+        for (const series of this.series) {
+            series.position.x = -chartWidth / 2 - visualOffset;
+            series.position.y = -this.grid.gridLinesShiftY;
+        }
         this._refreshSeriesData();
     }
 
@@ -292,41 +325,7 @@ export class Chart extends Gfx.Object3D
             const entry = {
                 timestamp,
                 flags: 0,
-                values: null as any,
-                GetSize:         ()              => 4,
-                GetValueAt:      (idx: number)  => ([open, high, low, close])[idx] ?? 0,
-                HasValue:        ()              => false,
-                IsGe:            ()              => false,
-                IsGt:            ()              => false,
-                IsLe:            ()              => false,
-                IsLt:            ()              => false,
-                IsWithinRange:   ()              => false,
-                GetAvg:          ()              => (open + high + low + close) / 4,
-                GetMin:          ()              => Math.min(open, close),
-                GetMax:          ()              => Math.max(open, close),
-                GetSum:          ()              => open + high + low + close,
-                GetValues2:      ()              => ({ val1: open, val2: high }),
-                GetValues3:      ()              => ({ val1: open, val2: high, val3: low }),
-                GetValues4:      ()              => ({ val1: open, val2: high, val3: low, val4: close }),
-                GetDayOfYear:    ()              => 0,
-                GetMonth:        ()              => 0,
-                GetYear:         ()              => 0,
-                GetTime:         ()              => timestamp,
-                GetDataType:     ()              => 0,
-                GetDataTypeFlags:()              => 0,
-                Resize:          ()              => false,
-                CheckFlag:       ()              => false,
-                CheckFlags:      ()              => false,
-                CheckFlagsAll:   ()              => false,
-                AddFlags:        ()              => {},
-                RemoveFlags:     ()              => {},
-                SetFlag:         ()              => {},
-                SetFlags:        ()              => {},
-                GetFlags:        ()              => 0,
-                IsValid:         ()              => true,
-                ToCSV:           ()              => `${open},${high},${low},${close}`,
-                ToString:        ()              => `${open},${high},${low},${close}`,
-                delete:          ()              => {},
+                values: [open, high, low, close],
             } as unknown as IndicatorDataEntry;
 
             values.push(entry);
