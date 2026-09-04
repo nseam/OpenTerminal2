@@ -1,7 +1,8 @@
 import * as Gfx from 'three';
 import { Bar } from './Bar';
 import { type TesterValuesColumns } from 'fx31337-wasm/lib/types/TesterValuesColumns';
-import { Chart } from './Chart';
+import { type Chart } from './Chart';
+import { Renderer } from './../Renderer';
 
 /**
  * A series of OHLC bars rendered efficiently using InstancedMesh.
@@ -17,99 +18,108 @@ export class Series extends Gfx.Object3D
     // so Bar objects are reused across zoom changes without re-allocation.
     public bars: Bar[] = [];
 
-    /** Number of currently active (visible) bars — always ≤ bars.length. */
-    private _activeBarCount: number = 0;
+    /**
+     * The chart to which this series belongs.
+     */
+    public chart: Chart;
 
-    /** Returns the number of active bars in this series. */
-    public getNumBars(): number {
-        return this._activeBarCount;
-    }
-    /** Shared unit-cube geometry for InstancedMesh. */
-    private _boxGeometry = new Gfx.BoxGeometry(1, 1, 1);
+    /** Number of currently allocated bars */
+    private numBarsAllocated: number = 0;
+
+    /**
+     * Frame id (see Renderer.frameId) at which updateFade() was last run, used to avoid redoing
+     * that work when updateMatrixWorld() is invoked multiple times within the same real frame
+     * (e.g. by SSAA's multiple internal render() calls).
+     */
+    private lastUpdatedFrameId: number = -1;
+
+    /** Shared unit-cube geometry for InstancedMesh with per-instance opacity. */
+    private gfxCubeGeometry: Gfx.BoxGeometry = (() => {
+        const geo = new Gfx.BoxGeometry(1, 1, 1);
+        // Create the opacity InstancedBufferAttribute with fill(1). All cubes default to fully opaque.
+        geo.setAttribute('opacity', new Gfx.InstancedBufferAttribute(new Float32Array(16).fill(1), 1));
+        return geo;
+    })();
 
     /** Single InstancedMesh that renders all bar boxes. */
-    private _instancedMesh: Gfx.InstancedMesh | null = null;
+    private cubeMesh: Gfx.InstancedMesh | null = null;
 
     /** Shared material for the instanced bars — transparent so edge-fade uses alpha. */
-    private _boxMaterial = Series._makeBoxMaterial();
-
-    /** Per-instance opacity values written to the 'instanceOpacity' geometry attribute. */
-    private _instanceOpacityArr: Float32Array | null = null;
+    private gfxMaterialCube = Series.createCubeMaterial();
 
     /** BufferGeometry holding all vertical lines as LineSegments pairs. */
-    private _lineGeometry: Gfx.BufferGeometry | null = null;
+    private gfxLineGeometry: Gfx.BufferGeometry | null = null;
 
     /** Single LineSegments that renders all bar wicks. */
-    private _lineMesh: Gfx.LineSegments | null = null;
+    private gfxLineMesh: Gfx.LineSegments | null = null;
 
     /** Material for the line mesh (tracked for proper disposal). */
-    private _lineMaterial: Gfx.LineBasicMaterial | null = null;
-
-    /** Per-vertex (2 per bar) opacity values written to the 'aOpacity' geometry attribute. */
-    private _lineOpacityArr: Float32Array | null = null;
+    private gfxMaterialLine: Gfx.LineBasicMaterial | null = null;
 
     /** Temporary color reused when setting instance colors. */
     private _tempColor = new Gfx.Color();
 
-    /** Number of bar-widths at each edge over which bars fade in/out. */
-    private static readonly FADE_BARS = 3;
-
-    /** The current bar width (used for scale). */
-    private _barWidth: number = 0.1;
-
-    /** The current bar spacing (used for layout). */
-    private _barSpacing: number = 0.05;
-
     /** Allocated GPU buffer capacity in number of bars — only grows, never shrinks on zoom. */
-    private _allocatedCapacityMesh: number = 0;
+    private numAllocatedCubes: number = 0;
 
     /** Allocated GPU buffer capacity in number of lines — only grows, never shrinks on zoom. */
-    private _allocatedCapacityLines: number = 0;
+    private numAllocatedLines: number = 0;
+
+    /** The chart width and height used during the last layout pass (for line rendering). */
+    public _chartWidth: number = 1;
+    public _chartHeight: number = 1;
 
     /** The data for this series, stored as an array of TesterValuesColumns. */
-    private _data: TesterValuesColumns[] = [];
-
-    /**
-     * Gets the current data set for this series.
-     */
-    public getData(): TesterValuesColumns[] {
-        return this._data;
-    }
+    public data: TesterValuesColumns[] = [];
 
     /** Constructor. */
-    public constructor() {
+    public constructor(chart: Chart) {
         super();
+
+        this.chart = chart;
     }
 
-    /** Creates the shared box material with per-instance alpha support via shader injection. */
-    private static _makeBoxMaterial(): Gfx.MeshLambertMaterial {
+    /**
+     * Creates the shared box material with per-instance alpha support via shader injection.
+     */
+    private static createCubeMaterial(): Gfx.MeshLambertMaterial {
         const mat = new Gfx.MeshLambertMaterial({ transparent: true });
         mat.onBeforeCompile = (shader) => {
+            // Inject instance color attribute so per-instance colors are read.
             shader.vertexShader =
-                'attribute float instanceOpacity;\nvarying float vInstanceOpacity;\n' +
+                'varying vec3 vInstanceColor;\n' +
+                'attribute float opacity;\n' +
+                'varying float vopacity;\n' +
                 shader.vertexShader.replace(
                     'void main() {',
-                    'void main() {\n\tvInstanceOpacity = instanceOpacity;'
+                    'void main() {\nvInstanceColor = instanceColor.xyz;\n' +'vopacity = opacity;'
                 );
+            // Multiply the diffuse color by per-instance color in fragment shader.
             shader.fragmentShader =
-                'varying float vInstanceOpacity;\n' +
+                'varying vec3 vInstanceColor;\n' +
+                'varying float vopacity;\n' +
                 shader.fragmentShader.replace(
                     '#include <premultiplied_alpha_fragment>',
-                    'gl_FragColor.a *= vInstanceOpacity;\n#include <premultiplied_alpha_fragment>'
+                    'gl_FragColor.rgb = vInstanceColor;\n' +
+                    'gl_FragColor.a *= vopacity;\n' +
+                    '#include <premultiplied_alpha_fragment>'
                 );
         };
+
         return mat;
     }
 
-    /** Creates a line material with per-vertex alpha support via shader injection. */
-    private static _makeLineMaterial(): Gfx.LineBasicMaterial {
+    /**
+     * Creates a line material with per-vertex alpha support via shader injection.
+     */
+    private static createLineMaterial(): Gfx.LineBasicMaterial {
         const mat = new Gfx.LineBasicMaterial({ vertexColors: true, transparent: true });
         mat.onBeforeCompile = (shader) => {
             shader.vertexShader =
-                'attribute float aOpacity;\nvarying float vOpacity;\n' +
+                'attribute float opacity;\nvarying float vOpacity;\n' +
                 shader.vertexShader.replace(
                     'void main() {',
-                    'void main() {\n\tvOpacity = aOpacity;'
+                    'void main() {\n\tvOpacity = opacity;'
                 );
             shader.fragmentShader =
                 'varying float vOpacity;\n' +
@@ -127,41 +137,7 @@ export class Series extends Gfx.Object3D
      * @param data The data to set for this series.
      */
     public setData(data: TesterValuesColumns[]): void {
-        this._data = data;
-
-        this.updateGraphics();
-    }
-
-    /**
-     * Sets the number of bars displayed at one for the series.
-     * 
-     * @param numBars The number of bars to set.
-     * @param barWidth The width of each bar.
-     * @param barSpacing The spacing between bars.
-     */
-    public setNumBarsDisplayed(numBars: number, barWidth: number, barSpacing: number): void {
-        if (numBars < 0)
-            throw new Error('Number of bars cannot be negative.');
-
-        // Use Math.ceil to ensure the target is an integer so that the bar array length
-        // and allocated capacity are always in sync.
-        const numBarsInt = Math.ceil(numBars);
-
-        this._barWidth = this.parent instanceof Chart ? barWidth * (this.parent as Chart)._zoom : barWidth;
-        this._barSpacing = this.parent instanceof Chart ? barSpacing * (this.parent as Chart)._zoom : barSpacing;
-
-        // Grow the bar pool only when we need more bars than ever before.
-        // Existing Bar objects are reused on zoom-out — no allocation needed.
-        while (this.bars.length < numBarsInt) {
-            const previousBar = this.bars.length > 0 ? this.bars[this.bars.length - 1] : null;
-            this.bars.push(new Bar(previousBar));
-        }
-
-        // Activate exactly numBarsInt bars — no objects created or destroyed.
-        this._activeBarCount = numBarsInt;
-
-        // Sets InstancedMesh and LineSegments capacity.
-        this._setCapacity(numBarsInt);
+        this.data = data;
 
         this.updateGraphics();
     }
@@ -170,14 +146,19 @@ export class Series extends Gfx.Object3D
      * Updates the graphics for the series, including layout, instance matrices, and line geometry.
      */
     public updateGraphics(): void {
-        // Layout bars in the x-axis.
-        this.layoutBars(this._barWidth, this._barSpacing);
+        // Ensures that instanced meshes for cubes and lines have sufficient capacity.
+        this.setBarsCapacity(this.chart.numBarsVisible);
+
+        // Layout bars cubes.
+        this.layoutBars();
+
+        this.updateColors();
+
+        // Update lines for bars.
+        this.updateLines();
 
         // Update all instance matrices and colors.
-        this.updateInstances();
-
-        // Update line geometry for all bars.
-        this.updateLines();
+        this.updateCubes();
     }
 
     /**
@@ -185,48 +166,59 @@ export class Series extends Gfx.Object3D
      * requested count exceeds the current GPU buffer size. Otherwise reuses the existing
      * buffer and adjusts the draw count via `InstancedMesh.count`.
      */
-    private _setInstancedMeshCapacity(count: number): void {
-        if (this._instancedMesh === null) {
-            this._instancedMesh = new Gfx.InstancedMesh(this._boxGeometry, this._boxMaterial, count);
-            this._instancedMesh.instanceMatrix.setUsage(Gfx.DynamicDrawUsage);
-            this.add(this._instancedMesh);
-        } else if (count > this._allocatedCapacityMesh) {
-            const oldMesh = this._instancedMesh;
-            const copyCount = this._allocatedCapacityMesh;
+    private setCubesCapacity(count: number): void {
+        if (this.cubeMesh === null) {
+            this.cubeMesh = new Gfx.InstancedMesh(this.gfxCubeGeometry, this.gfxMaterialCube, count);
+            this.cubeMesh.instanceMatrix.setUsage(Gfx.DynamicDrawUsage);
+            this.add(this.cubeMesh);
+        }
+        
+        if (count > this.numAllocatedCubes) {
+            // Allocate a new InstancedMesh with the increased capacity and copy existing instance data.
+            const oldMesh = this.cubeMesh;
+            const oldNumAllocatedCubes = this.numAllocatedCubes;
 
-            this._instancedMesh = new Gfx.InstancedMesh(this._boxGeometry, this._boxMaterial, count);
-            this._instancedMesh.instanceMatrix.setUsage(Gfx.DynamicDrawUsage);
+            this.cubeMesh = new Gfx.InstancedMesh(this.gfxCubeGeometry, this.gfxMaterialCube, count);
+
+            // Setting the usage of the instance matrix to dynamic draw for efficient updates.
+            this.cubeMesh.instanceMatrix.setUsage(Gfx.DynamicDrawUsage);
 
             const targetMatrix = new Gfx.Matrix4();
-            for (let i = 0; i < copyCount; i++) {
+
+            for (let i = 0; i < oldNumAllocatedCubes; i++) {
                 oldMesh.getMatrixAt(i, targetMatrix);
-                this._instancedMesh.setMatrixAt(i, targetMatrix);
-                if (oldMesh.instanceColor && this._instancedMesh.instanceColor) {
+                this.cubeMesh.setMatrixAt(i, targetMatrix);
+
+                if (oldMesh.instanceColor && this.cubeMesh.instanceColor) {
                     oldMesh.getColorAt(i, this._tempColor);
-                    this._instancedMesh.setColorAt(i, this._tempColor);
+                    this.cubeMesh.setColorAt(i, this._tempColor);
                 }
             }
 
-            this._instancedMesh.instanceMatrix.needsUpdate = true;
-            if (this._instancedMesh.instanceColor)
-                this._instancedMesh.instanceColor.needsUpdate = true;
+            this.cubeMesh.instanceMatrix.needsUpdate = true;
+
+            if (this.cubeMesh.instanceColor)
+                this.cubeMesh.instanceColor.needsUpdate = true;
 
             oldMesh.parent?.remove(oldMesh);
-            this.add(this._instancedMesh);
 
-            this._allocatedCapacityMesh = count;
+            this.add(this.cubeMesh);
+
+            this.numAllocatedCubes = count;
         }
 
-        // Ensure per-instance opacity attribute is large enough and attached to the geometry.
-        if (!this._instanceOpacityArr || this._instanceOpacityArr.length < count) {
-            this._instanceOpacityArr = new Float32Array(count).fill(1);
-            this._boxGeometry.setAttribute(
-                'instanceOpacity',
-                new Gfx.InstancedBufferAttribute(this._instanceOpacityArr, 1)
-            );
+        // Ensure per-instance opacity attribute on cube geometry has enough capacity.
+        const currentOpacityAttr = this.gfxCubeGeometry.getAttribute('opacity') as Gfx.InstancedBufferAttribute | null;
+        if (currentOpacityAttr && count > currentOpacityAttr.count) {
+            // Grow the opacity array to match the new capacity.
+            const newOpacityArray = new Float32Array(count).fill(1);
+            this.gfxCubeGeometry.setAttribute('opacity', new Gfx.InstancedBufferAttribute(newOpacityArray, 1));
+        } else if (!currentOpacityAttr) {
+            // Fallback: should not happen since we init in the constructor, but just in case.
+            this.gfxCubeGeometry.setAttribute('opacity', new Gfx.InstancedBufferAttribute(new Float32Array(count).fill(1), 1));
         }
 
-        this._instancedMesh.count = count;
+        this.cubeMesh.count = count;
     }
 
     /**
@@ -234,167 +226,244 @@ export class Series extends Gfx.Object3D
      * requested count exceeds the current GPU buffer size. Otherwise reuses the existing
      * buffer and adjusts the draw range via `setDrawRange`.
      */
-    private _setLineSegmentsCapacity(count: number): void {
-        if (this._lineMesh === null || count > this._allocatedCapacityLines) {
+    private setLinesCapacity(count: number): void {
+        if (this.gfxLineMesh === null || count > this.numAllocatedLines) {
             // Dispose old material and geometry.
-            if (this._lineMaterial) {
-                this._lineMaterial.dispose();
-                this._lineMaterial = null;
-            } 
-            if (this._lineGeometry) {
-                this._lineGeometry.dispose();
-                this._lineGeometry = null;
+            if (this.gfxMaterialLine) {
+                this.gfxMaterialLine.dispose();
+                this.gfxMaterialLine = null;
             }
-            if (this._lineMesh) {
-                this.remove(this._lineMesh);
-                this._lineMesh = null;
+
+            // Dispose old geometry if it exists.
+            if (this.gfxLineGeometry) {
+                this.gfxLineGeometry.dispose();
+                this.gfxLineGeometry = null;
+            }
+
+            // Remove old mesh from the scene if it exists.
+            if (this.gfxLineMesh) {
+                this.remove(this.gfxLineMesh);
+                this.gfxLineMesh = null;
             }
 
             // Create new geometry and buffers sized to the new capacity.
-            this._lineGeometry = new Gfx.BufferGeometry();
-            const posAttr = new Gfx.BufferAttribute(new Float32Array(count * 6), 3);
-            const colAttr = new Gfx.BufferAttribute(new Float32Array(count * 6), 3);
-            this._lineOpacityArr = new Float32Array(count * 2).fill(1);
-            this._lineGeometry.setAttribute('position', posAttr);
-            this._lineGeometry.setAttribute('color', colAttr);
-            this._lineGeometry.setAttribute('aOpacity', new Gfx.BufferAttribute(this._lineOpacityArr, 1));
+            this.gfxLineGeometry = new Gfx.BufferGeometry();
 
-            this._lineMaterial = Series._makeLineMaterial();
-            this._lineMesh = new Gfx.LineSegments(this._lineGeometry, this._lineMaterial);
-            this.add(this._lineMesh);
+            const attributePosition = new Gfx.BufferAttribute(new Float32Array(count * 6), 3);
+            const attributeColor = new Gfx.BufferAttribute(new Float32Array(count * 6), 3);
+            const attributeOpacity = new Gfx.BufferAttribute(new Float32Array(count * 2).fill(1), 1);
 
-            this._allocatedCapacityLines = count;
+            this.gfxLineGeometry.setAttribute('position', attributePosition);
+            this.gfxLineGeometry.setAttribute('color', attributeColor);
+            this.gfxLineGeometry.setAttribute('opacity', attributeOpacity);
+
+            this.gfxMaterialLine = Series.createLineMaterial();
+
+            this.gfxLineMesh = new Gfx.LineSegments(this.gfxLineGeometry, this.gfxMaterialLine);
+
+            this.add(this.gfxLineMesh);
+
+            this.numAllocatedLines = count;
         }
-        // Always update the draw range to exactly the requested count — no reallocation needed.
-        this._lineGeometry!.setDrawRange(0, count * 2);
 
-   }
+        // Always update the draw range to exactly the requested count — no reallocation needed.
+        this.gfxLineGeometry!.setDrawRange(0, count * 2);
+    }
 
     /**
      * Ensures InstancedMesh and LineSegments buffers can hold at least `count` bars.
      * Buffers only grow — they are never shrunk on zoom. The visible draw count is
      * adjusted via `InstancedMesh.count` / `setDrawRange` to avoid GPU reallocations.
      */
-    private _setCapacity(count: number): void {
-        this._setInstancedMeshCapacity(count);
-        this._setLineSegmentsCapacity(count);
+    private setBarsCapacity(count: number): void {
+        if (count <= this.numBarsAllocated)
+            return;
+
+        console.log(`Setting bars capacity to ${count}`);
+
+        this.bars = new Array(count).fill(null).map(() => new Bar());
+        
+        this.setCubesCapacity(count);
+        this.setLinesCapacity(count);
+
+        this.numBarsAllocated = count;
     }
 
     /**
      * Gets the matrix for a given instance index (from either old or new InstancedMesh).
      */
-    private _getMatrixAt(index: number): Gfx.Matrix4 {
-        // After replacement, data is already in this._instancedMesh.
-        // This helper exists for the resize path; during normal updates we write directly.
-        const m = new Gfx.Matrix4();
-        this._instancedMesh!.getMatrixAt(index, m);
-        return m;
+    private getCubeMatrixAtIndex(index: number): Gfx.Matrix4 {
+        const boxMatrix = new Gfx.Matrix4();
+        this.cubeMesh!.getMatrixAt(index, boxMatrix);
+        return boxMatrix;
     }
 
     /**
      * Gets the color for a given instance index.
      */
-    private _getColorAt(index: number): Gfx.Color {
-        const c = new Gfx.Color();
-        this._instancedMesh!.getColorAt(index, c);
-        return c;
+    private getBarColorAtIndex(index: number): Gfx.Color {
+        const barColor = new Gfx.Color();
+        this.cubeMesh!.getColorAt(index, barColor);
+        return barColor;
+    }
+
+    /**
+     * Computes fade alpha for a bar, fading near all four chart edges (left, right, top, bottom).
+     * Returns 0 when the bar falls completely outside the chart bounds on either axis.
+     * `posX`/`minY`/`maxY` are Series-local coordinates; this.position offsets (applied by
+     * Chart for scrolling) are added to compare against the Chart's own bounding box.
+     */
+    private computeEdgeFadeAlpha(posX: number, minY: number, maxY: number): number {
+        const bbox = this.chart.getBBox();
+
+        const worldX = this.position.x + posX;
+        const worldMinY = this.position.y + minY;
+        const worldMaxY = this.position.y + maxY;
+
+        const fadeDistanceX = this.chart.verticalLineDistance / 4;
+        const fadeDistanceY = this.chart.horizontalLineDistance / 4;
+
+        const distToEdgeX = Math.min(worldX - bbox.min.x, bbox.max.x - worldX);
+        if (distToEdgeX <= 0)
+            return 0;
+
+        let alpha = Math.min(1.0, Math.pow(distToEdgeX / fadeDistanceX, 2));
+
+        // Use the tightest vertical margin so a bar hidden by either its top or bottom edge fades/hides correctly.
+        const distToEdgeY = Math.min(worldMinY - bbox.min.y, bbox.max.y - worldMaxY);
+        if (distToEdgeY <= 0)
+            return 0;
+
+        alpha = Math.min(alpha, Math.pow(distToEdgeY / fadeDistanceY, 2));
+
+        return alpha;
     }
 
     /**
      * Layouts the bars in the series so that they are next to each other, with a small spacing between them.
-     * 
-     * @param barWidth The width of each bar.
-     * @param spacing The spacing between bars.
      */
-    public layoutBars(barWidth: number = 0.1, spacing: number = 0.1): void {
-        for (let i = 0; i < this._activeBarCount; i++) {
-            const bar = this.bars[i];
-            bar.posX = (i + 1) * (barWidth + spacing);
-        }
-    }
+    public layoutBars(): void {
+        const bbox = this.chart.getBBox();
+        const chartWidth = bbox.max.x - bbox.min.x;
+        const chartHeight = bbox.max.y - bbox.min.y;
+        const centerY = (bbox.min.y + bbox.max.y) / 2;
 
-    /**
-     * Returns a [0..1] fade factor for a bar at the given series-local x,
-     * fading to 0 near the chart's left and right edges.
-     */
-    private _edgeFade(barLocalX: number): number {
-        const chart = this.parent instanceof Chart ? this.parent as Chart : null;
-        if (!chart) return 1;
-        const unzoomedStep = chart.barWidth + chart.barSpacing;
-        const halfW       = chart.numBars * unzoomedStep / 2;
-        const fadeZone    = (this._barWidth + this._barSpacing) * Series.FADE_BARS;
-        const barWorldX   = this.position.x + barLocalX;
-        const leftFade    = Math.max(0, Math.min(1, (barWorldX - (-halfW)) / fadeZone));
-        const rightFade   = Math.max(0, Math.min(1, (halfW  - barWorldX)  / fadeZone));
-        return Math.min(leftFade, rightFade);
+        for (let barIdx = 0; barIdx < this.chart.numBarsVisible; barIdx++) {
+            const bar = this.bars[barIdx];
+
+            // X position: absolute world space from chart spacing parameters.
+            bar.posX = (barIdx + 1) * (this.chart.barWidth + this.chart.barSpacing) * this.chart.zoom;
+
+            if (chartHeight > 0 && centerY !== 0) {
+                bar.posY = this.chart.getBBox().min.y + bar.o;
+            } else {
+                bar.posY = 0; // fallback to center when no price range available
+            }
+
+            // Scale values proportional to normalized chart dimensions for consistent rendering at any zoom level.
+            if (chartHeight > 0) {
+                // Width: fraction of visible X range → ~3% per bar with current defaults.
+                bar._scaleWidth = this.chart.barWidth / chartWidth * this.chart.zoom;
+                // Height: raw OHLC range as fraction of total chart height × visibility multiplier (5).
+                bar._scaleBoxY = Math.max(bar.c - bar.o, 0.001) * this.chart.barScaleY;
+                bar._scaleZ = this.chart.barWidth / chartWidth * this.chart.zoom;
+            } else {
+                bar._scaleWidth = 0.3;
+                bar._scaleBoxY = 0.3;
+                bar._scaleZ = 0.3;
+            }
+        }
     }
 
     /**
      * Updates all instance matrices and colors on the InstancedMesh.
      */
-    private updateInstances(): void {
-        if (!this._instancedMesh)
+    private updateCubes(): void {
+        if (!this.cubeMesh)
             return;
 
-        const count = this._activeBarCount;
-        const opacityAttr = this._boxGeometry.getAttribute('instanceOpacity') as Gfx.InstancedBufferAttribute | null;
+        const attributeOpacity = this.gfxCubeGeometry.getAttribute('opacity') as Gfx.InstancedBufferAttribute | null;
 
-        for (let i = 0; i < count; i++) {
-            const bar = this.bars[i];
-            const boxHeight = Math.abs(bar.c - bar.o);
-            bar.updateMatrix(this._barWidth, boxHeight);
-            this._instancedMesh.setMatrixAt(i, bar.getMatrix());
+        for (let barIdx = 0; barIdx < this.chart.numBarsVisible; barIdx++) {
+            const bar = this.bars[barIdx];
 
-            const dc = bar.displayColor;
-            this._tempColor.set(dc.r, dc.g, dc.b);
-            this._instancedMesh.setColorAt(i, this._tempColor);
+            const cubeHeight = Math.abs(bar.c - bar.o);
 
-            if (opacityAttr) opacityAttr.array[i] = this._edgeFade(bar.posX);
+            bar.updateMatrix(this.chart.barWidth, cubeHeight);
+
+            this.cubeMesh.setMatrixAt(barIdx, bar.getMatrix());
+
+            this._tempColor.set(bar.displayColor.r, bar.displayColor.g, bar.displayColor.b);
+
+            this.cubeMesh.setColorAt(barIdx, this._tempColor);
+
+            const barMinY = Math.min(bar.posY, bar.posY + (bar.c - bar.o));
+            const barMaxY = Math.max(bar.posY, bar.posY + (bar.c - bar.o));
+            const alpha = this.computeEdgeFadeAlpha(bar.posX, barMinY, barMaxY);
+
+            if (attributeOpacity)
+                attributeOpacity.array[barIdx] = alpha;
         }
 
-        this._instancedMesh.instanceMatrix.needsUpdate = true;
-        if (this._instancedMesh.instanceColor)
-            this._instancedMesh.instanceColor.needsUpdate = true;
-        if (opacityAttr) opacityAttr.needsUpdate = true;
+        this.cubeMesh.instanceMatrix.needsUpdate = true;
 
-        this._instancedMesh.count = count;
+        if (this.cubeMesh.instanceColor)
+            this.cubeMesh.instanceColor.needsUpdate = true;
+
+        if (attributeOpacity)
+            attributeOpacity.needsUpdate = true;
+
+        this.cubeMesh.count = this.chart.numBarsVisible;
     }
 
     /**
      * Updates the shared LineSegments geometry with all bar wicks (high→low lines).
+     * Uses normalized Y positions consistent with bar layout for proper alignment.
      */
     private updateLines(): void {
-        if (!this._lineMesh || !this._lineGeometry)
+        if (!this.gfxLineMesh || !this.gfxLineGeometry)
             return;
 
-        const positions = this._lineGeometry.attributes.position.array as Float32Array;
-        const colors    = this._lineGeometry.attributes.color.array as Float32Array;
-        const opacities = this._lineGeometry.attributes.aOpacity?.array as Float32Array | undefined;
-        const count = this._activeBarCount;
+        const positions = this.gfxLineGeometry.attributes.position.array as Float32Array;
+        const colors    = this.gfxLineGeometry.attributes.color.array as Float32Array;
+        const opacities = this.gfxLineGeometry.attributes.opacity.array as Float32Array | undefined;
 
-        for (let i = 0; i < count; i++) {
-            const bar  = this.bars[i];
-            const base = i * 6;
-            positions[base + 0] = bar.posX; positions[base + 1] = bar.h; positions[base + 2] = 0;
-            positions[base + 3] = bar.posX; positions[base + 4] = bar.l; positions[base + 5] = 0;
+        for (let barIdx = 0; barIdx < this.chart.numBarsVisible; barIdx++) {
+            const bar  = this.bars[barIdx];
+            const base = barIdx * 6;
 
-            const dc    = bar.displayColor;
-            const cBase = i * 6;
-            colors[cBase + 0] = dc.r; colors[cBase + 1] = dc.g; colors[cBase + 2] = dc.b;
-            colors[cBase + 3] = dc.r; colors[cBase + 4] = dc.g; colors[cBase + 5] = dc.b;
+            // Normalize high and low to the same coordinate system as bars.
+            const hNorm = bar.h * this.chart.barScaleY;
+            const lNorm = bar.l * this.chart.barScaleY;
+
+            positions[base + 0] = bar.posX;     positions[base + 1] = hNorm; positions[base + 2] = 0;
+            positions[base + 3] = bar.posX;     positions[base + 4] = lNorm; positions[base + 5] = 0;
+
+            const barDisplayColor = bar.displayColor;
+
+            const cBase = barIdx * 6;
+
+            colors[cBase + 0] = barDisplayColor.r; colors[cBase + 1] = barDisplayColor.g; colors[cBase + 2] = barDisplayColor.b;
+            colors[cBase + 3] = barDisplayColor.r; colors[cBase + 4] = barDisplayColor.g; colors[cBase + 5] = barDisplayColor.b;
+
+            const lineMinY = Math.min(hNorm, lNorm);
+            const lineMaxY = Math.max(hNorm, lNorm);
+            const lineAlpha = this.computeEdgeFadeAlpha(bar.posX, lineMinY, lineMaxY);
 
             if (opacities) {
-                const fade = this._edgeFade(bar.posX);
-                opacities[i * 2]     = fade;
-                opacities[i * 2 + 1] = fade;
+                // Opacity attribute has itemSize 1 (one value per vertex), unlike position/color's itemSize 3.
+                opacities[barIdx * 2 + 0] = lineAlpha;
+                opacities[barIdx * 2 + 1] = lineAlpha;
             }
         }
 
-        this._lineGeometry.attributes.position.needsUpdate = true;
-        this._lineGeometry.attributes.color.needsUpdate    = true;
-        if (opacities) (this._lineGeometry.attributes.aOpacity as Gfx.BufferAttribute).needsUpdate = true;
+        this.gfxLineGeometry.attributes.position.needsUpdate = true;
+        this.gfxLineGeometry.attributes.color.needsUpdate    = true;
 
-        this._lineGeometry.setDrawRange(0, count * 2);
+        if (opacities)
+            (this.gfxLineGeometry.attributes.opacity as Gfx.BufferAttribute).needsUpdate = true;
+
+        this.gfxLineGeometry.setDrawRange(0, this.chart.numBarsVisible * 2);
     }
 
     /**
@@ -403,7 +472,7 @@ export class Series extends Gfx.Object3D
     public randomizeBars(): void {
         const date = new Date();
 
-        for (let i = 0; i < this._activeBarCount; i++) {
+        for (let i = 0; i < this.numBarsAllocated; i++) {
             const bar = this.bars[i];
             const o = i > 0 ? this.bars[i - 1].c : Math.random() * 0.2;
             const h = o + Math.random() * 0.2;
@@ -412,29 +481,37 @@ export class Series extends Gfx.Object3D
             bar.setValues(date.getTime(), o, h, l, c);
             date.setTime(date.getTime() + 60 * 1000); // Increment by 1 minute for each bar.
         }
-        // After randomizing, push updates to GPU.
-        this.updateInstances();
-        this.updateLines();
+        
+        this.updateGraphics();
     }
 
-    public updateBarsFromData(data: TesterValuesColumns, startIndex: number = 0): void {
-        const date = new Date();
+    /**
+     * Updates the bars with new data or existing data. Will refresh the visual representation of the bars accordingly for the current window.
+     *
+     * @param data The new data to update the bars with.
+     */
+    public updateBars(data: TesterValuesColumns): void {
+        this.setBarsCapacity(this.chart.numBarsVisible);
 
-        for (let i = 0; i < this._activeBarCount; i++) {
-            const bar = this.bars[i];
-            if (i + startIndex < data.values.length) {
-                const row = data.values[i + startIndex];
+        // Always re-layout bars so Y positions and scales are normalized relative to current BBox.
+        this.layoutBars();
+
+        for (let barIdx = 0; barIdx < this.chart.numBarsVisible; barIdx++) {
+            const bar = this.bars[barIdx];
+            
+            if (barIdx + this.chart.startIndex < data.values.length) {
+                const row = data.values[barIdx + this.chart.startIndex];
                 const ohlc = row.values;
-                bar.setValues(date.getTime(), ohlc[0], ohlc[1], ohlc[2], ohlc[3]);
+                // `timestamp` is in Unix seconds; bars store milliseconds.
+                const timeMs = Number(row.timestamp) * 1000;
+                bar.setValues(timeMs, ohlc[0], ohlc[1], ohlc[2], ohlc[3]);
             } else {
                 // If there's no data for this bar, set it to zero values.
-                bar.setValues(date.getTime(), 0, 0, 0, 0);
+                bar.setValues(0, 0, 0, 0, 0);
             }
-            date.setTime(date.getTime() + 60 * 1000); // Increment by 1 minute for each bar.
         }
-        // After updating from data, push updates to GPU.
-        this.updateInstances();
-        this.updateLines();
+        
+        this.updateGraphics();
     }
 
     /**
@@ -449,29 +526,76 @@ export class Series extends Gfx.Object3D
     }
 
     /**
-     * Updates only the instance colors on the InstancedMesh (not matrices).
-     * Call this after selection/hover state changes to refresh bar colors.
+     * Updates cubes and lines colors.
      */
     public updateColors(): void {
-        if (!this._instancedMesh) return;
+        if (!this.cubeMesh)
+            return;
 
-        const count = this._activeBarCount;
-        const opacityAttr = this._boxGeometry.getAttribute('instanceOpacity') as Gfx.InstancedBufferAttribute | null;
+        const attributeOpacity = this.gfxCubeGeometry.getAttribute('opacity') as Gfx.InstancedBufferAttribute | null;
 
-        for (let i = 0; i < count; i++) {
-            const bar = this.bars[i];
-            const dc = bar.displayColor;
-            this._tempColor.set(dc.r, dc.g, dc.b);
-            this._instancedMesh.setColorAt(i, this._tempColor);
-            if (opacityAttr) opacityAttr.array[i] = this._edgeFade(bar.posX);
+        for (let barIndex = 0; barIndex < this.chart.numBarsVisible; barIndex++) {
+            const bar = this.bars[barIndex];
+
+            // Colorizing bar depending if it is bullish or bearish.
+            bar.displayColor.r = bar.c >= bar.o ? 0 : 1;
+            bar.displayColor.g = bar.c >= bar.o ? 1 : 0;
+            bar.displayColor.b = 0;
+
+            this._tempColor.set(bar.displayColor.r, bar.displayColor.g, bar.displayColor.b);
+
+            this.cubeMesh.setColorAt(barIndex, this._tempColor);
+
+            // Update the opacity attribute for this bar based on its fade state.
+            if (attributeOpacity) {
+                const barMinY = Math.min(bar.posY, bar.posY + (bar.c - bar.o));
+                const barMaxY = Math.max(bar.posY, bar.posY + (bar.c - bar.o));
+                attributeOpacity.array[barIndex] = this.computeEdgeFadeAlpha(bar.posX, barMinY, barMaxY);
+            }
         }
 
-        if (this._instancedMesh.instanceColor)
-            this._instancedMesh.instanceColor.needsUpdate = true;
-        if (opacityAttr) opacityAttr.needsUpdate = true;
+        if (this.cubeMesh.instanceColor)
+            this.cubeMesh.instanceColor.needsUpdate = true;
 
-        // Also update line colors.
-        this.updateLines();
+        if (attributeOpacity)
+            attributeOpacity.needsUpdate = true;
+    }
+
+    /**
+     * Recomputes only the per-instance/per-vertex fade opacity for cubes and lines, without
+     * touching matrices or colors. Called every frame so fading stays in sync with scroll/zoom.
+     */
+    private updateFade(): void {
+        const attributeOpacity = this.gfxCubeGeometry.getAttribute('opacity') as Gfx.InstancedBufferAttribute | null;
+        const lineOpacities = this.gfxLineGeometry?.attributes.opacity.array as Float32Array | undefined;
+
+        for (let barIdx = 0; barIdx < this.chart.numBarsVisible; barIdx++) {
+            const bar = this.bars[barIdx];
+
+            if (attributeOpacity) {
+                const barMinY = Math.min(bar.posY, bar.posY + (bar.c - bar.o));
+                const barMaxY = Math.max(bar.posY, bar.posY + (bar.c - bar.o));
+                attributeOpacity.array[barIdx] = this.computeEdgeFadeAlpha(bar.posX, barMinY, barMaxY);
+            }
+
+            if (lineOpacities) {
+                const hNorm = bar.h * this.chart.barScaleY;
+                const lNorm = bar.l * this.chart.barScaleY;
+                const lineMinY = Math.min(hNorm, lNorm);
+                const lineMaxY = Math.max(hNorm, lNorm);
+                const lineAlpha = this.computeEdgeFadeAlpha(bar.posX, lineMinY, lineMaxY);
+
+                // Opacity attribute has itemSize 1 (one value per vertex), unlike position/color's itemSize 3.
+                lineOpacities[barIdx * 2 + 0] = lineAlpha;
+                lineOpacities[barIdx * 2 + 1] = lineAlpha;
+            }
+        }
+
+        if (attributeOpacity)
+            attributeOpacity.needsUpdate = true;
+
+        if (lineOpacities)
+            (this.gfxLineGeometry!.attributes.opacity as Gfx.BufferAttribute).needsUpdate = true;
     }
 
     /**
@@ -479,18 +603,18 @@ export class Series extends Gfx.Object3D
      * Used internally by picking to ensure geometry is up-to-date before raycasting.
      */
     public updateMatricesOnly(): void {
-        if (!this._instancedMesh) return;
+        if (!this.cubeMesh) return;
 
-        const count = this._activeBarCount;
+        const count = this.chart.numBarsVisible;
         for (let i = 0; i < count; i++) {
             const bar = this.bars[i];
             const boxHeight = Math.abs(bar.c - bar.o);
-            bar.updateMatrix(this._barWidth, boxHeight);
-            this._instancedMesh.setMatrixAt(i, bar.getMatrix());
+            bar.updateMatrix(this.chart.barWidth, boxHeight);
+            this.cubeMesh.setMatrixAt(i, bar.getMatrix());
         }
 
-        this._instancedMesh.instanceMatrix.needsUpdate = true;
-        this._instancedMesh.count = count;
+        this.cubeMesh.instanceMatrix.needsUpdate = true;
+        this.cubeMesh.count = count;
     }
 
     /**
@@ -498,5 +622,12 @@ export class Series extends Gfx.Object3D
      */
     public override updateMatrixWorld(force?: boolean): void {
         super.updateMatrixWorld(force);
+
+        if (Renderer.frameId === this.lastUpdatedFrameId)
+            return;
+
+        this.lastUpdatedFrameId = Renderer.frameId;
+
+        this.updateFade();
     }
 }

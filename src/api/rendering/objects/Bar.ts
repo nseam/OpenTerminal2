@@ -54,11 +54,19 @@ export class Bar
     // The x position set by Series.layoutBars.
     public posX: number = 0;
 
+    /** Normalized Y coordinate (0-1 relative to BBox) set by Series.layoutBars. */
+    public posY: number = 0;
+
+    /** Scale values proportional to chart dimensions, set by Series.layoutBars. */
+    public _scaleWidth: number = 0.3;
+    public _scaleBoxY: number = 0.3;
+    public _scaleZ: number = 0.3;
+
     /**
      * Constructor.
      */
-    public constructor(previousBar: Bar | null = null) {
-        this.previousBar = previousBar;
+    public constructor() {
+        this._baseColor.set(0x00ff00); // Default green
     }
 
     /**
@@ -92,15 +100,13 @@ export class Bar
         this.l = l;
         this.c = c;
 
-        // Update the base color of the bar based on the previous bar's close price.
-        if (this.previousBar) {
-            if (c > this.previousBar.c) {
-                this._baseColor.set(0x00ff00); // Green for increasing
-            } else if (c < this.previousBar.c) {
-                this._baseColor.set(0xff0000); // Red for decreasing
-            } else {
-                this._baseColor.set(0x0000ff); // Blue for no change
-            }
+        // Update the base color based on close vs open (works even without previousBar).
+        if (c > o) {
+            this._baseColor.set(0x00ff00); // Green for bullish candle
+        } else if (c < o) {
+            this._baseColor.set(0xff0000); // Red for bearish candle
+        } else {
+            this._baseColor.set(0x0000ff); // Blue for doji/flat
         }
     }
 
@@ -109,15 +115,22 @@ export class Bar
      * The box geometry is a unit cube (1×1×1); scale is applied via the matrix's 
      * scaling component so that InstancedMesh renders bars of different heights.
      *
-     * @param barWidth  Width of each bar (x-scale).
+     * @param _chartWidth  Chart width in world units (used for Y-to-world conversion).
+     * @param _boxHeight   The original raw OHLC height (deprecated — use _scaleBoxY instead).
      */
-    public updateMatrix(barWidth: number, boxHeight: number): void {
-        const boxY = (this.c + this.o) / 2;
+    public updateMatrix(_chartWidth: number, _boxHeight: number): void {
+        // Use normalized coordinates relative to BBox (0-1 range).
+        const worldY = this.posY;
+        const scale = new Gfx.Vector3(
+            this._scaleWidth,
+            Math.max(this._scaleBoxY, 0.001),
+            this._scaleZ
+        );
         // Build a matrix that encodes position + scale for the unit-cube geometry.
         this._matrix.compose(
-            new Gfx.Vector3(this.posX, boxY, 0),
+            new Gfx.Vector3(this.posX, worldY, 0),
             new Gfx.Quaternion(),
-            new Gfx.Vector3(barWidth, Math.max(boxHeight, 0.001), barWidth)
+            scale
         );
     }
 

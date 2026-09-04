@@ -18,6 +18,11 @@ export type RendererRenderPassOptions = {
 
 export class RendererRenderPass
 {
+    /**
+     * The currently active renderer pass.
+     */
+    public static Current?: RendererRenderPass;
+
     // Rednerer instance that this render pass belongs to.
     public readonly renderer: Renderer;
 

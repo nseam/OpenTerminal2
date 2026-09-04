@@ -83,6 +83,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         window.addEventListener('blur', this.handleBlur.bind(this));
         canvas.addEventListener('wheel', this.handleWheel.bind(this), { passive: false });
         this._centerCameraOnChart();
+        this._chart.numBarsVisible = this._chart.numInitialBars;
     }
 
     /**
@@ -99,19 +100,32 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     }
 
     /**
+     * Centers the camera on the chart at a distance proportional to chart width.
+     */
+    private _centerCameraOnChart(): void {
+        if (!this.camera) return;
+        const bbox = this._chart.getBBox();
+        const centerX = (bbox.min.x + bbox.max.x) / 2;
+        const centerY = (bbox.min.y + bbox.max.y) / 2;
+
+        // Compute the chart width in world units.
+        const chartWidth = bbox.max.x - bbox.min.x;
+
+        // Calculate camera Z distance so that the full chart width fits within the horizontal FOV.
+        const aspect = this.camera.native.aspect || 1;
+        const fovRad = (this.camera.native.fov * Math.PI) / 180;
+        const halfHFOV = fovRad / 2;
+        const neededZ = (chartWidth / 2) / Math.tan(halfHFOV) / aspect;
+        const distance = Math.max(neededZ, chartWidth);
+
+        this.camera.position.set(centerX, centerY, distance);
+        this.camera.lookAt(centerX, centerY, 0);
+    }
+
+    /**
      * @inheritdoc
      */
     public override update(renderPass: RendererRenderPass): void {
-        // Apply smooth scroll: advance chart by current velocity then decay.
-        if (Math.abs(this._scrollVelocity) > 0.00001) {
-            this._chart.scrollByPixels(this._scrollVelocity, 0);
-            this._scrollVelocity *= 0.90;
-            this._restoreSelection();
-        } else if (this._scrollVelocity !== 0) {
-            this._scrollVelocity = 0;
-            this._chart.snapToNearestBar();
-        }
-
     }
 
     /**
@@ -133,11 +147,14 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
 
     // Re-applies _selectedGlobalBarIndex to the current bar window after a scroll.
     private _restoreSelection(): void {
+        // @todo
+        return;
+
         for (const child of this.scene?.children ?? []) {
             if (!(child instanceof Chart)) continue;
-            for (const series of child.series) {
-                for (let b = 0; b < series.getNumBars(); b++) {
-                    const globalIdx = child.barsStartIndex + b;
+            for (const series of child.bars) {
+                for (let b = 0; b < series.chart.numBars; b++) {
+                    const globalIdx = child.scrollX + b;
                     series.bars[b].selected = (globalIdx === this._selectedGlobalBarIndex);
                 }
                 series.updateColors();
@@ -146,6 +163,9 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     }
 
     private resetAllBarStates(): void {
+        // @todo
+        return;
+
         for (const child of this.scene?.children ?? []) {
             if (child instanceof Series) {
                 for (const bar of child.bars) {
@@ -154,7 +174,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
                 }
                 child.updateColors();
             } else if (child instanceof Chart) {
-                for (const series of child.series) {
+                for (const series of child.bars) {
                     for (const bar of series.bars) {
                         bar.selected = false;
                         bar.hovered = false;
@@ -237,14 +257,8 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
             this._chart.zoom = 1;
         }
         else if (e.key === 'Home') {
-            // Reseting camera position and rotation to default.
-            if (this.camera) {
-                // Centering camera on the chart but from the behind.
-                const bbox = this._chart.getBBox();
-                this.camera.position.set((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
-                this.camera.lookAt((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
-    
-            }
+            // Resetting camera position and rotation to default.
+            this._centerCameraOnChart();
         }
     }
 
@@ -325,7 +339,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
                             if (parent instanceof Series) {
                                 const bar = parent.bars[instanceId];
                                 if (bar) {
-                                    const globalIdx = this._chart.barsStartIndex + instanceId;
+                                    const globalIdx = this._chart.scrollX + instanceId;
                                     if (bar.selected) {
                                         bar.selected = false;
                                         this._selectedGlobalBarIndex = -1;
@@ -364,8 +378,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         const viewportPosition = this.renderer.clientToViewport(this._cacheVector2);
 
         if (this.isScrolling) {
-            console.log(`Scrolling chart by pixels: (${e.movementX}, ${e.movementY})`);
-            this._chart.scrollByPixels(0, e.movementY * -0.002);
+            this._chart.scrollBy(0, e.movementY * -0.002);
             this._restoreSelection();
         }
         else if (objectPicker) {
@@ -391,7 +404,8 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
                             const bar = parent.bars[instanceId];
                             if (bar) {
                                 bar.hovered = true;
-                                parent.updateColors(); // Refresh colors on GPU.
+                                // @todo
+                                // this.chart.updateColors(); // Refresh colors on GPU.
                             }
                             return;
                         }
@@ -419,7 +433,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      */
     private handleWheel(e: WheelEvent): void {
         if (e.deltaY !== 0) {
-            this._scrollVelocity += e.deltaY * -0.001;
+            this._chart.scrollBy(e.deltaY * -0.002, 0);
         }
         e.preventDefault();
     }

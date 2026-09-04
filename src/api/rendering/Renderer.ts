@@ -13,6 +13,14 @@ import { RendererRenderPass, RendererRenderPassOptions } from './RendererRenderP
 @Known.class('BuiltIn.Renderer')
 export class Renderer
 {
+    /**
+     * Monotonically increasing id bumped once per real animation frame (not per internal render call).
+     * SSAA and other multi-sample passes call WebGLRenderer.render() several times per visible frame,
+     * each of which triggers a full scene updateMatrixWorld() traversal. Objects that do expensive
+     * per-frame work (grid layout, label DOM updates, etc.) inside updateMatrixWorld() should compare
+     * against this id to only run that work once per actual frame.
+     */
+    public static frameId: number = 0;
 
     // Native WebGLRenderer instance used for rendering.
     public native: Gfx.WebGLRenderer;
@@ -85,6 +93,8 @@ export class Renderer
      */
     animationLoop (time: DOMHighResTimeStamp, frame: XRFrame): void
     {
+        Renderer.frameId++;
+
         if (this.container)
             this.update(this.container, time, frame);
     }
@@ -98,6 +108,18 @@ export class Renderer
         const rect = this.container.getBoundingClientRect();
         const x = (client.x - rect.left) / rect.width * 2 - 1;
         const y = 1 - ((client.y - rect.top) / rect.height * 2);
+
+        return new Gfx.Vector2(x, y);
+    }
+
+    viewportToClient(viewport: Gfx.Vector2): Gfx.Vector2
+    {
+        if (!this.container)
+            throw new Error('Container is not set. Please set the container before using viewportToClient.');
+
+        const rect = this.container.getBoundingClientRect();
+        const x = ((viewport.x + 1) / 2) * rect.width + rect.left;
+        const y = ((1 - viewport.y) / 2) * rect.height + rect.top;
 
         return new Gfx.Vector2(x, y);
     }
@@ -131,6 +153,11 @@ export class Renderer
 
         // Disabling context menu on right click for the canvas to prevent default browser context menu.
         this.native.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+        this.native.domElement.style.position = 'absolute';
+        this.native.domElement.style.top = '0';
+        this.native.domElement.style.left = '0';
+        this.native.domElement.style.width = '100%';
+        this.native.domElement.style.height = '100%';
 
         this.container = container;
     }
@@ -150,6 +177,8 @@ export class Renderer
         {
             if (!pass.activeScene || !pass.camera)
                 continue;
+
+            RendererRenderPass.Current = pass;
 
             pass.activeScene.update(this);
 

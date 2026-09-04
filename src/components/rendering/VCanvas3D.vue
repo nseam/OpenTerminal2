@@ -36,13 +36,12 @@
     import { TesterValues } from 'fx31337-wasm/lib/types/TesterValues.js';
     import { Bar } from '../../api/rendering/objects/Bar';
     import { ChartObjectManipulator } from '../../api/rendering/plugins/chart/ChartObjectManipulator';
-    import { ChartGridLabelsPlugin } from '../../api/rendering/plugins/chart/ChartGridLabelsPlugin';
+    //import { ChartGridLabelsPlugin } from '../../api/rendering/plugins/chart/ChartGridLabelsPlugin';
     import { Chart } from '../../api/rendering/objects/Chart';
     import { Series } from '../../api/rendering/objects/Series';
 
     const chart = new Chart(20, 0.05, 0.04);
-    const series = new Series();
-    chart.addSeries(series);
+    const series = chart.addSeries();
     chart.setData(Chart.randomizeData());
 
     class IndicatorRunTest extends Test {
@@ -120,7 +119,7 @@
             light.position.set(10, 2, 5);
             scene.add(light);
 
-            const light2 = new Gfx.AmbientLight(0xffffff, 0.1);
+            const light2 = new Gfx.AmbientLight(0xffffff, 0.3);
             light2.position.set(2, 1, 5);
             scene.add(light2);
 
@@ -147,6 +146,14 @@
 
             scene.background = new Gfx.Color(0x000000);
 
+            // Add lights so MeshLambertMaterial renders colored bars (not black).
+            const ambientLight = new Gfx.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            
+            const dirLight = new Gfx.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(0, 5, 10);
+            scene.add(dirLight);
+
             const rendererPass = this.renderer.addRenderPass({
                 name: 'main',
                 scene,
@@ -168,9 +175,9 @@
             rendererPass.addPlugin(ChartObjectManipulator, {
                 chart: chart,
             });
-            rendererPass.addPlugin(ChartGridLabelsPlugin, {
-                chart: chart,
-            });
+            //rendererPass.addPlugin(ChartGridLabelsPlugin, {
+            //    chart: chart,
+            //});
             rendererPass.addPlugin(CameraMovement);
             rendererPass.addPlugin(FpsDisplay);
 
