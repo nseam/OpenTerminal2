@@ -6,6 +6,11 @@ import { ObjectPicker } from "../ObjectPicker";
 import { Series } from "../../objects/Series";
 import { Chart } from "../../objects/Chart";
 
+type ChartHit = {
+    series: Series;
+    target: { kind: 'bar'; barIndex: number } | { kind: 'point'; barIndex: number; valueIndex: number };
+};
+
 // Options for the ChartObjectManipulator plugin.
 export interface ChartObjectManipulatorOptions {
     chart: Chart;
@@ -51,6 +56,12 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
 
     // Vector2 cache.
     private _cacheVector2: Gfx.Vector2 = new Gfx.Vector2();
+
+    private _chartPickObjects: Gfx.Object3D[] = [];
+
+    private _hoveredTarget: ChartHit | null = null;
+
+    private _selectedTarget: ChartHit | null = null;
 
     // The chart object that this manipulator is currently interacting with.
     private _chart: Chart;
@@ -100,29 +111,6 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     }
 
     /**
-     * Centers the camera on the chart at a distance proportional to chart width.
-     */
-    private _centerCameraOnChart(): void {
-        if (!this.camera) return;
-        const bbox = this._chart.getBBox();
-        const centerX = (bbox.min.x + bbox.max.x) / 2;
-        const centerY = (bbox.min.y + bbox.max.y) / 2;
-
-        // Compute the chart width in world units.
-        const chartWidth = bbox.max.x - bbox.min.x;
-
-        // Calculate camera Z distance so that the full chart width fits within the horizontal FOV.
-        const aspect = this.camera.native.aspect || 1;
-        const fovRad = (this.camera.native.fov * Math.PI) / 180;
-        const halfHFOV = fovRad / 2;
-        const neededZ = (chartWidth / 2) / Math.tan(halfHFOV) / aspect;
-        const distance = Math.max(neededZ, chartWidth);
-
-        this.camera.position.set(centerX, centerY, distance);
-        this.camera.lookAt(centerX, centerY, 0);
-    }
-
-    /**
      * @inheritdoc
      */
     public override update(renderPass: RendererRenderPass): void {
@@ -139,10 +127,12 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      * Must be called before any pick operation to ensure only one bar is highlighted at a time.
      */
     private _centerCameraOnChart(): void {
-        if (!this.camera) return;
+        if (!this.camera)
+            return;
+
         const bbox = this._chart.getBBox();
-        this.camera.position.set((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
-        this.camera.lookAt((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1);
+        this.camera.position.set((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1.2);
+        this.camera.lookAt((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 2);
     }
 
     // Re-applies _selectedGlobalBarIndex to the current bar window after a scroll.
@@ -185,26 +175,24 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         }
     }
 
-    /**
-     * Resets all bar hover states across every series in the scene.
-     * Must be called before a hover pick operation to ensure only one bar is hovered.
-     */
+    /** Clears the previously hovered chart target. */
     private resetHoverStates(): void {
-        for (const child of this.scene?.children ?? []) {
-            if (child instanceof Series) {
-                for (const bar of child.bars) {
-                    bar.hovered = false;
-                }
-                // Update GPU colors immediately so stale hover highlights are cleared.
-                child.updateColors();
-            } else if (child instanceof Chart) {
-                for (const series of child.series) {
-                    for (const bar of series.bars) {
-                        bar.hovered = false;
-                    }
-                    series.updateColors();
-                }
+        const previous = this._hoveredTarget;
+        this._hoveredTarget = null;
+        if (!previous)
+            return;
+
+        if (previous.target.kind === 'bar') {
+            const bar = previous.series.bars[previous.target.barIndex];
+            if (bar) {
+                bar.hovered = false;
+                previous.series.updateBarColor(previous.target.barIndex);
             }
+        } else {
+            const bar = previous.series.bars[previous.target.barIndex];
+            if (bar)
+                bar.hovered = false;
+            previous.series.setHoveredValue(-1, -1);
         }
     }
 
@@ -213,22 +201,56 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      * Must be called before a selection pick operation to ensure a clean slate.
      */
     private resetSelectionStates(): void {
-        for (const child of this.scene?.children ?? []) {
-            if (child instanceof Series) {
-                for (const bar of child.bars) {
+        const previous = this._selectedTarget;
+        this._selectedTarget = null;
+        if (previous) {
+            if (previous.target.kind === 'bar') {
+                const bar = previous.series.bars[previous.target.barIndex];
+                if (bar) {
                     bar.selected = false;
+                    previous.series.updateBarColor(previous.target.barIndex);
                 }
-                // Update GPU colors immediately so stale selection highlights are cleared.
-                child.updateColors();
-            } else if (child instanceof Chart) {
-                for (const series of child.series) {
-                    for (const bar of series.bars) {
-                        bar.selected = false;
-                    }
-                    series.updateColors();
-                }
+            } else {
+                previous.series.setSelectedValue(-1, -1);
             }
         }
+        this._selectedGlobalBarIndex = -1;
+    }
+
+    private findChartHit(objectPicker: ObjectPicker, viewportPosition: Gfx.Vector2): ChartHit | null {
+        if (!this.scene || !this.camera)
+            return null;
+
+        const pickObjects = this._chartPickObjects;
+        pickObjects.length = 0;
+        for (const series of this._chart.series)
+            series.addPickableMeshes(pickObjects);
+
+        const intersections = objectPicker.pick(this.scene, this.camera, viewportPosition, Gfx.InstancedMesh, pickObjects) ?? [];
+
+        for (const hit of intersections) {
+            if (!(hit.object instanceof Gfx.InstancedMesh) || hit.instanceId === undefined)
+                continue;
+
+            const parent = hit.object.parent;
+            if (!(parent instanceof Series))
+                continue;
+
+            const target = parent.resolvePickTarget(hit.object, hit.instanceId);
+            if (target)
+                return { series: parent, target };
+        }
+
+        return null;
+    }
+
+    private isSameTarget(first: ChartHit | null, second: ChartHit | null): boolean {
+        if (!first || !second || first.series !== second.series || first.target.kind !== second.target.kind ||
+            first.target.barIndex !== second.target.barIndex)
+            return false;
+
+        return first.target.kind === 'bar' ||
+            (second.target.kind === 'point' && first.target.valueIndex === second.target.valueIndex);
     }
 
     /**
@@ -315,44 +337,20 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
             const viewportPosition = this.renderer.clientToViewport(this._cacheVector2);
 
             if (objectPicker) {
-                // Reset selection states only — hover is independent.
+                const hit = this.findChartHit(objectPicker, viewportPosition);
+                const wasSelected = this.isSameTarget(hit, this._selectedTarget);
+
                 this.resetSelectionStates();
 
-                // Pick against InstancedMesh directly.
-                const raycaster = new Gfx.Raycaster();
-                raycaster.setFromCamera(viewportPosition, this.camera!.native);
-                const intersects = raycaster.intersectObjects(this.scene?.children ?? [], true);
 
-                if (intersects && intersects.length > 0) {
-                    for (const hit of intersects) {
-                        if (!(hit.object instanceof Gfx.InstancedMesh))
-                            continue;
-
-                        const instanceId = hit.instanceId;
-
-                        if (instanceId === undefined || instanceId < 0)
-                            continue;
-
-                        let parent: Gfx.Object3D | null = hit.object;
-
-                        while (parent) {
-                            if (parent instanceof Series) {
-                                const bar = parent.bars[instanceId];
-                                if (bar) {
-                                    const globalIdx = this._chart.scrollX + instanceId;
-                                    if (bar.selected) {
-                                        bar.selected = false;
-                                        this._selectedGlobalBarIndex = -1;
-                                    } else {
-                                        bar.selected = true;
-                                        this._selectedGlobalBarIndex = globalIdx;
-                                    }
-                                    parent.updateColors();
-                                }
-                                return;
-                            }
-                            parent = parent.parent;
-                        }
+                if (hit && !wasSelected) {
+                    this._selectedTarget = hit;
+                    if (hit.target.kind === 'bar') {
+                        hit.series.bars[hit.target.barIndex].selected = true;
+                        this._selectedGlobalBarIndex = this._chart.scrollX + hit.target.barIndex;
+                        hit.series.updateBarColor(hit.target.barIndex);
+                    } else {
+                        hit.series.setSelectedValue(hit.target.barIndex, hit.target.valueIndex);
                     }
                 }
             }
@@ -382,36 +380,19 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
             this._restoreSelection();
         }
         else if (objectPicker) {
-            // Reset all hover states before picking to ensure only one bar is hovered.
             this.resetHoverStates();
 
-            // Pick against InstancedMesh directly.
-            const raycaster = new Gfx.Raycaster();
-            raycaster.setFromCamera(viewportPosition, this.camera!.native);
-            const intersects = raycaster.intersectObjects(this.scene?.children ?? [], true);
-
-            if (intersects && intersects.length > 0) {
-                for (const hit of intersects) {
-                    // Only accept intersections from an InstancedMesh with a valid instanceId.
-                    if (!(hit.object instanceof Gfx.InstancedMesh)) continue;
-                    const instanceId = hit.instanceId;
-                    if (instanceId === undefined || instanceId < 0) continue;
-
-                    // Walk up to find parent Series.
-                    let parent: Gfx.Object3D | null = hit.object;
-                    while (parent) {
-                        if (parent instanceof Series) {
-                            const bar = parent.bars[instanceId];
-                            if (bar) {
-                                bar.hovered = true;
-                                // @todo
-                                // this.chart.updateColors(); // Refresh colors on GPU.
-                            }
-                            return;
-                        }
-                        parent = parent.parent;
-                    }
-                }
+            const hit = this.findChartHit(objectPicker, viewportPosition);
+            if (hit?.target.kind === 'bar') {
+                hit.series.bars[hit.target.barIndex].hovered = true;
+                hit.series.updateBarColor(hit.target.barIndex);
+                this._hoveredTarget = hit;
+            } else if (hit?.target.kind === 'point') {
+                const bar = hit.series.bars[hit.target.barIndex];
+                if (bar)
+                    bar.hovered = true;
+                hit.series.setHoveredValue(hit.target.barIndex, hit.target.valueIndex);
+                this._hoveredTarget = hit;
             }
         }
     }

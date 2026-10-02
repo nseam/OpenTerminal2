@@ -19,7 +19,7 @@
   import { OverlayScrollbars } from 'overlayscrollbars';
 
   @Component({
-    expose: ['open', 'close', 'triggerEl', 'triggerComponent'],
+    expose: ['open', 'close', 'triggerEl', 'triggerComponent', 'data'],
 
     // Providing a hook for VMenu to call when it closes, so the popup can close too.
     provide() {
@@ -65,12 +65,11 @@
     // The element that triggered the popup (set when open() is called).
     triggerEl: HTMLElement | null = null;
 
-    // The Vue component instance that triggered the popup, derived from triggerEl.
-    get triggerComponent(): any {
-        console.log('Trigger element:', this.triggerEl);
+    // The Vue component instance that triggered the popup.
+    triggerComponent: any = null;
 
-      return (this.triggerEl as any)?.__vueParentComponent?.proxy ?? null;
-    }
+    // Custom data supplied by the popup trigger.
+    data: Record<string, any> | null = null;
 
     // Current position of the popup in viewport coordinates.
     posX: number = 0;
@@ -127,12 +126,14 @@
 
     // Opens the popup near the given viewport coordinates,
     // clamped to stay at least 15 px inside the window on all sides.
-    open(x: number, y: number, triggerEl?: HTMLElement): void {
+    open(x: number, y: number, triggerEl?: HTMLElement, component?: any, data?: Record<string, any>): void {
       this.positioned = false;
       this.posX = 0;
       this.posY = 0;
       this.removeTriggerClass();
       this.triggerEl = triggerEl ?? null;
+      this.triggerComponent = component ?? null;
+      this.data = data ?? null;
       this.applyTriggerClass();
       this.visible = true;
 
@@ -203,6 +204,8 @@
       this.viewportMaxHeight   = null;
       this.removeTriggerClass();
       this.triggerEl           = null;
+      this.triggerComponent    = null;
+      this.data                = null;
       this.removeListeners();
     }
 

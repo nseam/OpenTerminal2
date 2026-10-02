@@ -5,6 +5,7 @@ import { Renderer } from './../Renderer';
 import { type TesterValuesColumns } from 'fx31337-wasm/lib/types/TesterValuesColumns';
 import { type TesterIndicatorInfo } from 'fx31337-wasm/lib/types/TesterIndicatorInfo';
 import { type IndicatorDataEntry } from 'fx31337-wasm/lib/types/IndicatorDataEntry';
+import { Bar } from './Bar';
 
 export class Chart extends Gfx.Object3D
 {
@@ -12,6 +13,11 @@ export class Chart extends Gfx.Object3D
      * Unique identifier for the chart. It's not the id of the Object3D as we need the id to be persistent across sessions.
      */
     public uuid: string = crypto.randomUUID();
+
+    /**
+     * Data for each of the series in the chart. Note that there can be timestep-based data and non-timestep-based data (e.g., for Renko series).
+     */
+    public data: TesterValuesColumns[] | null = null;
 
     /**
      * List of series to be displayed in the chart.
@@ -131,11 +137,6 @@ export class Chart extends Gfx.Object3D
     public bbox: Gfx.Box3 | null = null;
 
     /**
-     * The data for the chart, shared across all series.
-     */
-    private data: TesterValuesColumns | null = null;
-
-    /**
      * Cached OHLC values, invalidated whenever new data is set via setData().
      */
     private cachedOHLC: { o: number, h: number, l: number, c: number } | null = null;
@@ -160,6 +161,52 @@ export class Chart extends Gfx.Object3D
         this.numBarsVisible = Math.floor(this.numInitialBars / this._zoom);
 
         this.refreshSeriesData();
+    }
+
+    private _domBarHover: HTMLElement = document.createElement('div');
+
+    private positionBarHover = (event: MouseEvent): void => {
+        this._domBarHover.style.left = `${event.pageX + 10}px`;
+        this._domBarHover.style.top = `${event.pageY + 10}px`;
+    };
+
+    /**
+     * Updates the labels on the chart, e.g. hover tooltips.
+     */
+    public updateLabels(): void {
+        if (!this._domBarHover.parentElement) {
+            this._domBarHover.classList.add('chart-tooltip');
+            document.body.appendChild(this._domBarHover);
+            document.addEventListener('mousemove', this.positionBarHover);
+        }
+
+        // Displaying the hover tooltip only if the mouse is over a bar.
+        let isHoveringOverBar = false;
+
+        let hoveredBar: Bar | null = null;
+        let hoveredSeries: Series | null = null;
+        
+        for (const series of this.series) {
+            const visibleBars = Math.min(this.numBarsVisible, series.bars.length);
+            for (let barIndex = 0; barIndex < visibleBars; barIndex++) {
+                const bar = series.bars[barIndex];
+                if (bar.hovered) {
+                    isHoveringOverBar = true;
+                    hoveredSeries = series;
+                    hoveredBar = bar;
+                    break;
+                }
+            }
+
+            if (isHoveringOverBar)
+                break;
+        }
+
+        this._domBarHover.style.display = isHoveringOverBar ? 'block' : 'none';
+
+        if (hoveredBar && hoveredSeries) {
+            this._domBarHover.innerHTML = `Series: ${hoveredSeries.data?.indicator_info.name}<br>Values: ${hoveredBar.values.join(', ')}`;
+        }
     }
 
     /**
@@ -216,11 +263,22 @@ export class Chart extends Gfx.Object3D
      *
      * @param data The data to display.
      */
-    public setData(data: TesterValuesColumns): void {
+    public setData(data: TesterValuesColumns[] | null): void {
         this.data = data;
         this.cachedOHLC = null;
         this.invalidatedBBox = true;
-        this.refreshSeriesData();
+
+        if (this.data) {
+            for (let i = 0; i < this.data.length; i++) {
+                if (this.series.length <= i)
+                    this.addSeries();
+
+                this.series[i].setData(this.data[i]);
+                
+                this.series[i].updateGraphics();
+            }
+        }
+        
         this.scrollTo(0, 0); // Refresh the chart to reflect the new data.
         this.onDataSet?.();
     }
@@ -229,11 +287,10 @@ export class Chart extends Gfx.Object3D
      * Pushes the current data window (starting at barsStartIndex) to every series.
      */
     private refreshSeriesData(): void {
-        if (this.data === null)
-            return;
-
-        for (const series of this.series)
-            series.updateBars(this.data);
+        for (let i = 0; i < this.series.length; i++) {
+            this.series[i].setIndex(i);
+            this.series[i].updateGraphics();
+        }
     }
 
     /**
@@ -279,23 +336,45 @@ export class Chart extends Gfx.Object3D
 
         if (this.data !== null) {
             // Scan the full dataset so the OHLC range covers all bars, not just the visible window.
-            for (const entry of this.data.values) {
-                const ohlc = entry.values;
-                if (o === null || ohlc[0] < o) o = ohlc[0];
-                if (h === null || ohlc[1] > h) h = ohlc[1];
-                if (l === null || ohlc[2] < l) l = ohlc[2];
-                if (c === null || ohlc[3] > c) c = ohlc[3];
-            }
-        } else {
-            // Fallback: collect from the currently visible bar objects.
-            for (const series of this.series) {
-                for (const bar of series.bars) {
-                    if (o === null || bar.o < o) o = bar.o;
-                    if (h === null || bar.h > h) h = bar.h;
-                    if (l === null || bar.l < l) l = bar.l;
-                    if (c === null || bar.c > c) c = bar.c;
+            for (let i = 0; i < this.data.length; i++) {
+                for (const entry of this.data[i].values) {
+                    if (entry.values.length == 4) {
+                        if (o === null || entry.values[0] < o)
+                            o = entry.values[0];
+
+                        if (h === null || entry.values[1] > h)
+                            h = entry.values[1];
+
+                        if (l === null || entry.values[2] < l)
+                            l = entry.values[2];
+                        
+                        if (c === null || entry.values[3] > c)
+                            c = entry.values[3];
+                    }
+                    else {
+                        // Calculating OHLC from the first item of entry.values.
+                        const value = entry.values[0];
+
+                        if (o === null || value < o)
+                            o = value;
+
+                        if (h === null || value > h)
+                            h = value;
+
+                        if (l === null || value < l)
+                            l = value;
+
+                        if (c === null || value > c)
+                            c = value;
+                    }
                 }
             }
+        } else {
+            // Fallback: no data available, set OHLC to zero.
+            o = 0;
+            h = 0;
+            l = 0;
+            c = 0;
         }
 
         this.cachedOHLC = { o: o ?? 0, h: h ?? 0, l: l ?? 0, c: c ?? 0 };
@@ -310,7 +389,7 @@ export class Chart extends Gfx.Object3D
      */
     public getBBox(): Gfx.Box3 {
         if (!this.invalidatedBBox)
-            return this.bbox;
+            return this.bbox!;
 
         const bbox = new Gfx.Box3();
 
@@ -342,8 +421,18 @@ export class Chart extends Gfx.Object3D
      * @param y The target vertical scroll position.
      */
     public scrollTo(x: number, y: number = 0): void {
-        this.targetScrollX = x;
+        this.targetScrollX = Math.max(0, Math.min(x, this.getMaxScrollX()));
         this.targetScrollY = y;
+    }
+
+    private getMaxScrollX(): number {
+        const dataLength = this.data?.reduce(
+            (maxLength, seriesData) => Math.max(maxLength, seriesData.values.length ?? 0),
+            0
+        ) ?? 0;
+        const maxStartIndex = Math.max(0, dataLength - this.numBarsVisible);
+
+        return maxStartIndex * this.verticalLineDistance * this.zoom;
     }
 
     /**
@@ -364,10 +453,12 @@ export class Chart extends Gfx.Object3D
         //if (Math.abs(this.targetScrollX - this.scrollX) < 0.001 && Math.abs(this.targetScrollY - this.scrollY) < 0.001)
         //    return;
 
-        this.targetScrollX = Math.max(this.targetScrollX, 0);
+        const maxScrollX = this.getMaxScrollX();
+        this.targetScrollX = Math.max(0, Math.min(this.targetScrollX, maxScrollX));
 
         // Slowly interpolate the scroll position towards the target to create smooth scrolling.
         this.scrollX += (this.targetScrollX - this.scrollX) * 0.1;
+        this.scrollX = Math.max(0, Math.min(this.scrollX, maxScrollX));
         // this.scrollY += (this.targetScrollY - this.scrollY) * 0.01;
         this.scrollY = this.targetScrollY;
 
@@ -375,11 +466,11 @@ export class Chart extends Gfx.Object3D
         const chartHeight = this.getBBox().max.y - this.getBBox().min.y;
 
         // Calculating index of the bar that should be displayed on the left side of the chart. We take into consideration zoom level.
-        let barIndex = Math.floor(this.scrollX / this.verticalLineDistance * this.zoom);
+        let barIndex = Math.floor(this.scrollX / this.verticalLineDistance / this.zoom);
 
         this.startIndex = barIndex;
 
-        let shiftedPositionX = this.scrollX % (this.verticalLineDistance / this.zoom);
+        let shiftedPositionX = this.scrollX % (this.verticalLineDistance * this.zoom);
 
         for (const series of this.series) {
             series.position.x = -this.chartWidth / 2 - shiftedPositionX;
@@ -403,6 +494,7 @@ export class Chart extends Gfx.Object3D
         if (Renderer.frameId !== this.lastUpdatedFrameId) {
             this.lastUpdatedFrameId = Renderer.frameId;
             this.updateScroll();
+            this.updateLabels();
         }
 
         super.updateMatrixWorld(force);

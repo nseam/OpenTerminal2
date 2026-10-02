@@ -12,25 +12,7 @@ export class Bar
      */
     public time_ms: number = 0;
 
-    /**
-     * Open price.
-     */
-    public o: number = 0;
-
-    /**
-     * High price.
-     */
-    public h: number = 0;
-
-    /**
-     * Low price.
-     */
-    public l: number = 0;
-
-    /**
-     * Close price.
-     */
-    public c: number = 0;
+    public values: number[] = [];
 
     /**
      * Whether the bar is currently selected. This can be used to highlight the bar in the chart.
@@ -53,6 +35,9 @@ export class Bar
 
     // The x position set by Series.layoutBars.
     public posX: number = 0;
+
+    // The z position set by Series.layoutBars.
+    public posZ: number = 0;
 
     /** Normalized Y coordinate (0-1 relative to BBox) set by Series.layoutBars. */
     public posY: number = 0;
@@ -93,20 +78,22 @@ export class Bar
      * @param l Low price.
      * @param c Close price.
      */ 
-    public setValues(time_ms: number, o: number, h: number, l: number, c: number): void {
+    public setValues(time_ms: number, values: number[]): void {
         this.time_ms = time_ms;
-        this.o = o;
-        this.h = h;
-        this.l = l;
-        this.c = c;
+        this.values = values;
 
         // Update the base color based on close vs open (works even without previousBar).
-        if (c > o) {
-            this._baseColor.set(0x00ff00); // Green for bullish candle
-        } else if (c < o) {
-            this._baseColor.set(0xff0000); // Red for bearish candle
-        } else {
-            this._baseColor.set(0x0000ff); // Blue for doji/flat
+        if (values.length == 4) {
+            if (values[3] > values[0]) {
+                this._baseColor.set(0x00ff00); // Green for bullish candle.
+            } else if (values[3] < values[0]) {
+                this._baseColor.set(0xff0000); // Red for bearish candle.
+            } else {
+                this._baseColor.set(0x0000ff); // Blue for doji/flat.
+            }
+        }
+        else {
+            this._baseColor.set(0xffff00); // Yellow for non-OHLC bars.
         }
     }
 
@@ -128,7 +115,7 @@ export class Bar
         );
         // Build a matrix that encodes position + scale for the unit-cube geometry.
         this._matrix.compose(
-            new Gfx.Vector3(this.posX, worldY, 0),
+            new Gfx.Vector3(this.posX, worldY, this.posZ),
             new Gfx.Quaternion(),
             scale
         );

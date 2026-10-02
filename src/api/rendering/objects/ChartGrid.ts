@@ -166,6 +166,12 @@ export class ChartGrid extends Gfx.Object3D
 
         const chart = this.chart;
         const bbox = chart.getBBox();
+
+        if (bbox.isEmpty()) {
+            this.gfxGridLines.geometry.setDrawRange(0, 0);
+            return;
+        }
+
         const chartWidth  = this.chart.chartWidth;
         const chartHeight = this.chart.chartHeight;
 
@@ -338,7 +344,7 @@ export class ChartGrid extends Gfx.Object3D
         label.style.verticalAlign = 'middle';
         label.style.fontSize = '12px';
         label.style.color = '#777';
-        label.textContent = '12.34';
+        label.textContent = '';
 
         // Positioning label based on its type.
         if (labelType === 'horizontal-left') {
@@ -550,6 +556,9 @@ export class ChartGrid extends Gfx.Object3D
 
         const bbox = this.chart.getBBox();
 
+        if (bbox.isEmpty())
+            return;
+
         const clientWidth = this.labelsDOM.clientWidth;
         const clientHeight = this.labelsDOM.clientHeight;
 
@@ -654,6 +663,10 @@ export class ChartGrid extends Gfx.Object3D
             return;
 
         const bbox          = this.chart.getBBox();
+
+        if (bbox.isEmpty())
+            return;
+
         const fadeDistanceV = this.chart.initialVerticalLineDistance;
         const fadeDistanceH = this.chart.initialHorizontalLineDistance;
         const drawCount     = this.gfxGridLines.geometry.drawRange.count;

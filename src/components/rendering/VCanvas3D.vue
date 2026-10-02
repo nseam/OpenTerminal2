@@ -41,8 +41,6 @@
     import { Series } from '../../api/rendering/objects/Series';
 
     const chart = new Chart(20, 0.05, 0.04);
-    const series = chart.addSeries();
-    chart.setData(Chart.randomizeData());
 
     class IndicatorRunTest extends Test {
         async run(lib: LibModule): Promise<void> {
@@ -53,21 +51,26 @@
             const tfM1 = new lib.indicators.Tf(lib.timeframes.M1);
             tfM1.SetSource(ticker);
 
-            const rsiM1 = new lib.indicators.RSI({ period: 14, appliedPrice: lib.ap.close, shift: 0 });
+            const rsiM1 = new lib.indicators.RSI({ period: 14, applied_price: lib.ap.close, shift: 0 });
             rsiM1.SetName('RSI M1');
             rsiM1.SetSource(tfM1);
 
-            const appliedPriceM1 = new lib.indicators.AppliedPrice({ appliedPrice: lib.ap.close, shift: 0 });
+            const appliedPriceM1 = new lib.indicators.AppliedPrice({ applied_price: lib.ap.open, shift: 0 });
             appliedPriceM1.SetName('Applied Price M1');
             appliedPriceM1.SetSource(tfM1);
 
-            const ohlcM1 = new lib.indicators.OHLC({ appliedPrice: lib.ap.close, period: 0, shift: 0 });
+            const ohlcM1 = new lib.indicators.OHLC({ shift: 0 });
             ohlcM1.SetName('OHLC M1');
             ohlcM1.SetSource(tfM1);
 
+            const maM1 = new lib.indicators.MA({ period: 14, applied_price: lib.ap.open, shift: 0, ma_shift: 0, ma_method: lib.ma_methods.SMA });
+            maM1.SetName('MA M1');
+            maM1.SetSource(tfM1);
+
             //lib.Tester.Add(rsiM1);
-            //lib.Tester.Add(appliedPriceM1);
             lib.Tester.Add(ohlcM1);
+            lib.Tester.Add(appliedPriceM1);
+            lib.Tester.Add(maM1);
 
             lib.Tester.FeedTickProvider(ticker);
 
@@ -79,9 +82,9 @@
             // Passing 0n for both parameters means: all available history, up to most recent bar.
             const testerValues = lib.Tester.GetValues(BigInt(0), BigInt(0), 0, false);
 
-            //chart.setData(testerValues?.timestep_based[0]!);
+            chart.setData(testerValues?.timestep_based);
 
-            console.log(testerValues);
+            console.log(testerValues?.timestep_based);
         }
     }
 
@@ -312,6 +315,17 @@
     canvas {
         width: 100% !important;
         height: 100% !important;
+    }
+
+    .chart-tooltip {
+        position: absolute;
+        padding: 4px;
+        background: rgba(0, 0, 0, 0.8);
+        font-size: 12px;
+        color: #fff;
+        border-radius: 5px;
+        pointer-events: none;
+        z-index: 1000;
     }
 
 </style>
