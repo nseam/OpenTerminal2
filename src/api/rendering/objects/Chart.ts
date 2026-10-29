@@ -334,38 +334,46 @@ export class Chart extends Gfx.Object3D
         let l: number | null = null;
         let c: number | null = null;
 
+        const hasPriceRangeData = this.data?.some(series =>
+            series.values.some(entry => (entry.values as unknown as number[]).length >= 3)
+        ) ?? false;
+
         if (this.data !== null) {
             // Scan the full dataset so the OHLC range covers all bars, not just the visible window.
             for (let i = 0; i < this.data.length; i++) {
                 for (const entry of this.data[i].values) {
-                    if (entry.values.length == 4) {
-                        if (o === null || entry.values[0] < o)
-                            o = entry.values[0];
+                    const entryValues = entry.values as unknown as number[];
+                    if (hasPriceRangeData && entryValues.length < 3)
+                        continue;
 
-                        if (h === null || entry.values[1] > h)
-                            h = entry.values[1];
+                    if (entryValues.length == 4) {
+                        if (o === null || entryValues[0] < o)
+                            o = entryValues[0];
 
-                        if (l === null || entry.values[2] < l)
-                            l = entry.values[2];
+                        if (h === null || entryValues[1] > h)
+                            h = entryValues[1];
+
+                        if (l === null || entryValues[2] < l)
+                            l = entryValues[2];
                         
-                        if (c === null || entry.values[3] > c)
-                            c = entry.values[3];
+                        if (c === null || entryValues[3] > c)
+                            c = entryValues[3];
                     }
                     else {
-                        // Calculating OHLC from the first item of entry.values.
-                        const value = entry.values[0];
+                        // Price indicators can expose multiple channels (e.g. upper/lower bands).
+                        for (const value of entryValues) {
+                            if (o === null || value < o)
+                                o = value;
 
-                        if (o === null || value < o)
-                            o = value;
+                            if (h === null || value > h)
+                                h = value;
 
-                        if (h === null || value > h)
-                            h = value;
+                            if (l === null || value < l)
+                                l = value;
 
-                        if (l === null || value < l)
-                            l = value;
-
-                        if (c === null || value > c)
-                            c = value;
+                            if (c === null || value > c)
+                                c = value;
+                        }
                     }
                 }
             }
@@ -395,18 +403,20 @@ export class Chart extends Gfx.Object3D
 
         const ohlc = this.getOHLC();
 
-        // Front/back depth.
-        bbox.expandByPoint(new Gfx.Vector3(0, 0, -0.5));
-        bbox.expandByPoint(new Gfx.Vector3(0, 0,  0.1));
-
         // Vertical extent derived from the full price range of the data.
         bbox.expandByPoint(new Gfx.Vector3(0, ohlc.l, 0));
         bbox.expandByPoint(new Gfx.Vector3(0, ohlc.h, 0));
 
         // Horizontal extent — chart is centered at x=0 so bars and grid lines align.
         const chartWidth = this.numBarsVisible * (this.barWidth + this.barSpacing);
-        bbox.expandByPoint(new Gfx.Vector3(-chartWidth / 2, 0, 0));
-        bbox.expandByPoint(new Gfx.Vector3( chartWidth / 2, 0, 0));
+        bbox.expandByPoint(new Gfx.Vector3(-chartWidth / 2, ohlc.l, 0));
+        bbox.expandByPoint(new Gfx.Vector3( chartWidth / 2, ohlc.h, 0));
+
+        if (bbox.min.y == 0 && bbox.max.y == 0) {
+            // Making the bounding to have at least given height.
+            //bbox.expandByPoint(new Gfx.Vector3(-0.01, -0.1, -0.01));
+            //bbox.expandByPoint(new Gfx.Vector3( 0.01,  0.1,  0.01));
+        }
 
         this.bbox = bbox;
         this.invalidatedBBox = false;

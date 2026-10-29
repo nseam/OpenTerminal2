@@ -23,6 +23,7 @@ import {
   faLockOpen,
   faCaretRight,
 } from "@fortawesome/free-solid-svg-icons";
+import { AppLocalState } from './api/data/AppLocalState';
 
 library.add(faCircleHalfStroke, faLock, faLockOpen, faCaretRight)
 
@@ -38,6 +39,7 @@ app.use(ElementPlus)
 app.directive('popup', vPopup)
 
 app.config.globalProperties.$roamingState = AppRoamingState;
+app.config.globalProperties.$localState = AppLocalState;
 app.config.globalProperties.$settings = AppStaticSettings;
 
 app.mount('#app')

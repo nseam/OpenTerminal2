@@ -230,8 +230,10 @@ export class Series extends Gfx.Object3D
     public setData(data: TesterValuesColumns | null): void {
         this.data = data;
 
-        if (data?.values.length > 0 && data.values[0].values.length <= 1)
-            this.seriesType = SeriesType.Line;
+        if (data && data.values.length > 0) {
+            const firstEntry = data.values[0] as unknown as { values: { length: number } };
+            this.seriesType = firstEntry.values.length === 4 ? SeriesType.Candlestick : SeriesType.Line;
+        }
 
         this.updateGraphics();
     }
@@ -573,7 +575,8 @@ export class Series extends Gfx.Object3D
             bar.posX = (barIdx + 1) * (this.chart.barWidth + this.chart.barSpacing) * this.chart.zoom;
 
             if (chartHeight > 0 && centerY !== 0) {
-                bar.posY = this.chart.getBBox().min.y + bar.values[0];
+                // Values are absolute prices and the BBox already spans [low, high], so no BBox offset is added.
+                bar.posY = bar.values[0];
             } else {
                 bar.posY = 0; // fallback to center when no price range available
             }
@@ -1233,8 +1236,7 @@ export class Series extends Gfx.Object3D
     public override updateMatrixWorld(force?: boolean): void {
         super.updateMatrixWorld(force);
 
-        // Z position of the series will be determined by series index.
-        this.position.z = -this._index * this.chart.barSpacing * 2;
+        this.position.z = 0.001;
 
         if (Renderer.frameId === this.lastUpdatedFrameId)
             return;

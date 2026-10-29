@@ -95,6 +95,8 @@ export class RendererRenderPass
         if (this.plugins[pluginName])
             throw new Error(`There can't be more than one plugin with the same name "${pluginName}".`);
 
+        options = options ?? {} as TOptions;
+
         const plugin = new pluginType(this, options) as RendererPluginBase;
 
         this.plugins[pluginName] = plugin as RendererPluginBase;

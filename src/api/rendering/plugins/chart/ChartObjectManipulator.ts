@@ -13,7 +13,7 @@ type ChartHit = {
 
 // Options for the ChartObjectManipulator plugin.
 export interface ChartObjectManipulatorOptions {
-    chart: Chart;
+    chart?: Chart;
 }
 
 /**
@@ -63,9 +63,6 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
 
     private _selectedTarget: ChartHit | null = null;
 
-    // The chart object that this manipulator is currently interacting with.
-    private _chart: Chart;
-
     // Global bar index (barsStartIndex + series-local index) of the selected bar, or -1 if none.
     private _selectedGlobalBarIndex: number = -1;
 
@@ -77,9 +74,17 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     public constructor(rendererPass: RendererRenderPass, options: ChartObjectManipulatorOptions)
     {
         super(rendererPass, options);
+    }
 
-        this._chart = options.chart;
-        this._chart.onDataSet = () => this._centerCameraOnChart();
+    public setCurrentChart(chart: Chart): void {
+        this.options.chart = chart;
+
+        if (this.options.chart) {
+            this.options.chart.onDataSet = () => {
+                this.options.chart.numBarsVisible = this.options.chart.numInitialBars
+                this.centerCameraOnChart();
+            }
+        }
     }
 
     /**
@@ -93,8 +98,6 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         window.addEventListener('mouseup', this.handleMouseUp.bind(this));
         window.addEventListener('blur', this.handleBlur.bind(this));
         canvas.addEventListener('wheel', this.handleWheel.bind(this), { passive: false });
-        this._centerCameraOnChart();
-        this._chart.numBarsVisible = this._chart.numInitialBars;
     }
 
     /**
@@ -126,13 +129,17 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      * Resets all bar hover and selection states across every series in the scene.
      * Must be called before any pick operation to ensure only one bar is highlighted at a time.
      */
-    private _centerCameraOnChart(): void {
-        if (!this.camera)
+    public centerCameraOnChart(): void {
+        if (!this.camera || !this.options.chart) {
+            console.warn("Cannot center camera on chart: camera or chart is not available.");
             return;
+        }
 
-        const bbox = this._chart.getBBox();
+        const bbox = this.options.chart.getBBox();
         this.camera.position.set((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1.2);
         this.camera.lookAt((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 2);
+
+        console.log("Centered camera on chart:", this.options.chart, bbox);
     }
 
     // Re-applies _selectedGlobalBarIndex to the current bar window after a scroll.
@@ -218,12 +225,12 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     }
 
     private findChartHit(objectPicker: ObjectPicker, viewportPosition: Gfx.Vector2): ChartHit | null {
-        if (!this.scene || !this.camera)
+        if (!this.scene || !this.camera || !this.options.chart)
             return null;
 
         const pickObjects = this._chartPickObjects;
         pickObjects.length = 0;
-        for (const series of this._chart.series)
+        for (const series of this.options.chart.series)
             series.addPickableMeshes(pickObjects);
 
         const intersections = objectPicker.pick(this.scene, this.camera, viewportPosition, Gfx.InstancedMesh, pickObjects) ?? [];
@@ -260,6 +267,9 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     private handleKeyDown(e: KeyboardEvent): void {
         this.keysPressed[e.key.toLowerCase()] = true;
 
+        if (!this.options.chart)
+            return;
+
         if (e.shiftKey)
             this.isShiftPressed = true;
 
@@ -270,17 +280,17 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
             // Changing chart zoom.
             const zoomFactor = e.key === '+' || e.key === '=' ? 2 : 0.5;
 
-            const newZoom = this._chart.zoom * zoomFactor;
+            const newZoom = this.options.chart.zoom * zoomFactor;
 
             // Zoom could be clamped to a reasonable range if desired, e.g.:
-            this._chart.zoom = Math.max(1 / 256, Math.min(newZoom, 1));
+            this.options.chart.zoom = Math.max(1 / 256, Math.min(newZoom, 1));
         }
         else if (e.key === '0') {
-            this._chart.zoom = 1;
+            this.options.chart.zoom = 1;
         }
         else if (e.key === 'Home') {
             // Resetting camera position and rotation to default.
-            this._centerCameraOnChart();
+            this.centerCameraOnChart();
         }
     }
 
@@ -328,6 +338,8 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
             e.preventDefault();
         }
 
+        if (!this.options.chart)
+            return;
 
         // Using ObjectPicker plugin to pick objects in the scene when the left mouse button is clicked without Alt key.
         if (!e.altKey && e.button === 0) {
@@ -347,7 +359,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
                     this._selectedTarget = hit;
                     if (hit.target.kind === 'bar') {
                         hit.series.bars[hit.target.barIndex].selected = true;
-                        this._selectedGlobalBarIndex = this._chart.scrollX + hit.target.barIndex;
+                        this._selectedGlobalBarIndex = this.options.chart.scrollX + hit.target.barIndex;
                         hit.series.updateBarColor(hit.target.barIndex);
                     } else {
                         hit.series.setSelectedValue(hit.target.barIndex, hit.target.valueIndex);
@@ -363,9 +375,9 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      */
     private handleMouseMove(e: MouseEvent): void {
         const camera = this.camera;
+
         if (!camera)
             return;
-
 
         this.lastMouseX = e.offsetX;
         this.lastMouseY = e.offsetY;
@@ -376,11 +388,14 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         const viewportPosition = this.renderer.clientToViewport(this._cacheVector2);
 
         if (this.isScrolling) {
-            this._chart.scrollBy(0, e.movementY * -0.002);
+            this.options.chart?.scrollBy(0, e.movementY * -0.002);
             this._restoreSelection();
         }
         else if (objectPicker) {
             this.resetHoverStates();
+
+            if (!this.options.chart)
+                return;
 
             const hit = this.findChartHit(objectPicker, viewportPosition);
             if (hit?.target.kind === 'bar') {
@@ -414,7 +429,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      */
     private handleWheel(e: WheelEvent): void {
         if (e.deltaY !== 0) {
-            this._chart.scrollBy(e.deltaY * -0.002, 0);
+            this.options.chart?.scrollBy(e.deltaY * -0.002, 0);
         }
         e.preventDefault();
     }

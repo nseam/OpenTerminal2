@@ -10,7 +10,7 @@
             </div>
 
             <div class="attribute-value">
-                <ElInput v-model="roamingState.config.period" label="Shift" />
+                <ElInputNumber v-model="roamingState.config.period" :min="1" label="Shift" />
             </div>
         </div>
 
@@ -35,7 +35,7 @@
             </div>
 
             <div class="attribute-value">
-                <ElInput v-model="roamingState.config.shift" label="Shift" />
+                <ElInputNumber v-model="roamingState.config.shift" :min="0" label="Shift" />
             </div>
         </div>
 
@@ -47,13 +47,14 @@
 <!-- SCRIPT -->
 
 <script lang="ts">
-    import { ElInput, ElSelect, ElOption } from 'element-plus';
+    import { ElInput, ElSelect, ElOption, ElInputNumber } from 'element-plus';
 
     @Component({
         components: {
             ElInput,
             ElSelect,
-            ElOption
+            ElOption,
+            ElInputNumber
         }
     })
     class VRSIConfig extends Vue

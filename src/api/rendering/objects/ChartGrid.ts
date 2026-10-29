@@ -166,14 +166,11 @@ export class ChartGrid extends Gfx.Object3D
 
         const chart = this.chart;
         const bbox = chart.getBBox();
-
-        if (bbox.isEmpty()) {
-            this.gfxGridLines.geometry.setDrawRange(0, 0);
-            return;
-        }
-
         const chartWidth  = this.chart.chartWidth;
         const chartHeight = this.chart.chartHeight;
+
+        if (!Number.isFinite(chartWidth) || !Number.isFinite(chartHeight) || chartWidth <= 0 || chartHeight <= 0)
+            return;
 
         const numLinesHorizontal   = this.chart.numHorizontalLines;
         const numLinesVertical = this.chart.numInitialBars;
@@ -205,8 +202,6 @@ export class ChartGrid extends Gfx.Object3D
 
         if (!this.gfxPositionBuffer)
             return;
-
-        const chartVisibleWidth = chartWidth - 1.5 * lineDistanceHorizontal;
 
         let shiftX = this.chart.scrollX % lineDistanceVertical;
         let shiftY = this.chart.scrollY % lineDistanceHorizontal;
@@ -344,7 +339,7 @@ export class ChartGrid extends Gfx.Object3D
         label.style.verticalAlign = 'middle';
         label.style.fontSize = '12px';
         label.style.color = '#777';
-        label.textContent = '';
+        label.textContent = '12.34';
 
         // Positioning label based on its type.
         if (labelType === 'horizontal-left') {
@@ -556,9 +551,6 @@ export class ChartGrid extends Gfx.Object3D
 
         const bbox = this.chart.getBBox();
 
-        if (bbox.isEmpty())
-            return;
-
         const clientWidth = this.labelsDOM.clientWidth;
         const clientHeight = this.labelsDOM.clientHeight;
 
@@ -663,10 +655,6 @@ export class ChartGrid extends Gfx.Object3D
             return;
 
         const bbox          = this.chart.getBBox();
-
-        if (bbox.isEmpty())
-            return;
-
         const fadeDistanceV = this.chart.initialVerticalLineDistance;
         const fadeDistanceH = this.chart.initialHorizontalLineDistance;
         const drawCount     = this.gfxGridLines.geometry.drawRange.count;
@@ -676,9 +664,9 @@ export class ChartGrid extends Gfx.Object3D
         const col = this.gfxColorBuffer.array as Float32Array;
 
         // Base line color: 0x202020.
-        const r = 0x20 / 0xff;
-        const g = 0x20 / 0xff;
-        const b = 0x20 / 0xff;
+        const r = 0x08 / 0xff;
+        const g = 0x08 / 0xff;
+        const b = 0x08 / 0xff;
 
         for (let vi = 0; vi < vertexCount - 1; vi += 2) {
             const x0 = pos[vi * 3];

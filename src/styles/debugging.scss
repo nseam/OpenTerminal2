@@ -1,0 +1,42 @@
+.json-view-item {
+    display: flex;
+    justify-content: start;
+    flex-direction: column;
+    .data-key{
+        display: flex;
+        align-items: start;
+    }
+    div.value-key {
+        display: flex;
+        align-items: center;
+        padding: 0 15px;
+    }
+    span.value-key {
+        color: #bbb !important;
+    }
+    .value-type-boolean.value-false {
+        --jtv-boolean-color: #444;
+    }
+    .value-type-boolean.value-true {
+        --jtv-boolean-color: #67e2ca;
+    }
+    .value-type-string {
+        --jtv-string-color: rgb(116, 116, 116);
+    }
+    span {
+        display: flex;
+        height: 100%;
+        justify-self: center;
+        flex: 0;
+    }
+    .chevron-arrow {
+        margin-top: 5px !important;
+    }
+    button > span:nth-child(2) {
+        color: #b28ff4;
+        font-weight: 700;
+    }
+    button > span:nth-child(3) {
+        color: #999;
+    }
+}

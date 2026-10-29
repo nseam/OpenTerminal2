@@ -27,12 +27,9 @@
     import { PostProcessing } from '../../api/rendering/plugins/PostProcessing';
     import { CameraMovement } from '../../api/rendering/plugins/CameraMovement';
     import { FpsDisplay } from '../../api/rendering/plugins/FpsDisplay';
-    import { reactive, Reactive, shallowRef, triggerRef, type ShallowRef } from 'vue';
+    import { markRaw, reactive, Reactive, shallowRef, triggerRef, type ShallowRef } from 'vue';
     import { RendererRenderPass } from '../../api/rendering/RendererRenderPass';
 
-    // @ts-ignore
-    import createModule from 'fx31337-wasm/dist/IndicatorTest.js';
-    import { Test, run, LibModule } from 'fx31337-wasm/lib/Runner';
     import { TesterValues } from 'fx31337-wasm/lib/types/TesterValues.js';
     import { Bar } from '../../api/rendering/objects/Bar';
     import { ChartObjectManipulator } from '../../api/rendering/plugins/chart/ChartObjectManipulator';
@@ -40,75 +37,31 @@
     import { Chart } from '../../api/rendering/objects/Chart';
     import { Series } from '../../api/rendering/objects/Series';
 
-    const chart = new Chart(20, 0.05, 0.04);
-
-    class IndicatorRunTest extends Test {
-        async run(lib: LibModule): Promise<void> {
-            lib.Tester.Init();
-
-            const ticker = new lib.indicators.TickProvider({ symbol: 'EURUSD' });
-
-            const tfM1 = new lib.indicators.Tf(lib.timeframes.M1);
-            tfM1.SetSource(ticker);
-
-            const rsiM1 = new lib.indicators.RSI({ period: 14, applied_price: lib.ap.close, shift: 0 });
-            rsiM1.SetName('RSI M1');
-            rsiM1.SetSource(tfM1);
-
-            const appliedPriceM1 = new lib.indicators.AppliedPrice({ applied_price: lib.ap.open, shift: 0 });
-            appliedPriceM1.SetName('Applied Price M1');
-            appliedPriceM1.SetSource(tfM1);
-
-            const ohlcM1 = new lib.indicators.OHLC({ shift: 0 });
-            ohlcM1.SetName('OHLC M1');
-            ohlcM1.SetSource(tfM1);
-
-            const maM1 = new lib.indicators.MA({ period: 14, applied_price: lib.ap.open, shift: 0, ma_shift: 0, ma_method: lib.ma_methods.SMA });
-            maM1.SetName('MA M1');
-            maM1.SetSource(tfM1);
-
-            //lib.Tester.Add(rsiM1);
-            lib.Tester.Add(ohlcM1);
-            lib.Tester.Add(appliedPriceM1);
-            lib.Tester.Add(maM1);
-
-            lib.Tester.FeedTickProvider(ticker);
-
-            // Process all ticks through the indicator pipeline.
-            lib.Tester.RunAllTicks();
-
-
-            // Retrieve all ungrouped (raw, bar-by-bar) indicator values.
-            // Passing 0n for both parameters means: all available history, up to most recent bar.
-            const testerValues = lib.Tester.GetValues(BigInt(0), BigInt(0), 0, false);
-
-            chart.setData(testerValues?.timestep_based);
-
-            console.log(testerValues?.timestep_based);
-        }
-    }
-
-
+    
     @Component({
         components: {
 
         },
+        expose: ['scene', 'renderer'],
     })
-    class Canvas3D extends Vue {
+    export class VCanvas3D extends Vue {
 
         @Ref
         canvas!: HTMLDivElement
 
         renderer!: Renderer;
 
+        scene!: Scene;
+
+        planeMaterial!: Gfx.MeshBasicMaterial;
+
+        camera!: Camera;
+
         async mounted()
         {
-            run(IndicatorRunTest, createModule, 'node_modules/fx31337-wasm/dist/IndicatorTest.wasm');
+            this.scene = markRaw(new Scene());
 
-            const scene = new Scene();
-
-
-            const camera = new Camera(CameraKind.Perspective, 75, 0.1, 1000);
+            this.camera = markRaw(new Camera(CameraKind.Perspective, 75, 0.1, 1000));
 
             // const camera = new Camera(CameraKind.Orthographic, 75, 0.1, 100);
             // Rotating camera 180 degrees around Y axis to look towards negative Z direction.
@@ -116,24 +69,22 @@
             // camera.position.y = 0;
             // camera.position.z = 10;
 
-            this.renderer = new Renderer(this.canvas, { antialias: true }, scene);
+            this.renderer = markRaw(new Renderer(this.canvas, { antialias: true }, this.scene));
 
             const light = new Gfx.DirectionalLight(0xffffff, 0.9);
             light.position.set(10, 2, 5);
-            scene.add(light);
+            this.scene.add(light);
 
             const light2 = new Gfx.AmbientLight(0xffffff, 0.3);
             light2.position.set(2, 1, 5);
-            scene.add(light2);
+            this.scene.add(light2);
 
             const gridStep = 0.1;
             const gridSize = 16;
 
-            //scene.add(new Grid(gridSize, gridSize / gridStep, 0, 0x337733, 0x151515));
-            //scene.add(new Grid(gridSize, gridSize / gridStep / 10, 0, 0x337733, 0x333333));
-            //scene.add(new Grid(gridSize, gridSize / gridStep / 100, 0, 0x337733, 0x336699));
-
-            scene.add(chart);
+            //this.scene.add(new Grid(gridSize, gridSize / gridStep, 0, 0x337733, 0x151515));
+            //this.scene.add(new Grid(gridSize, gridSize / gridStep / 10, 0, 0x337733, 0x333333));
+            //this.scene.add(new Grid(gridSize, gridSize / gridStep / 100, 0, 0x337733, 0x336699));
 
             // Create a plane and apply the generated texture to it.
             const planeGeometry = new Gfx.PlaneGeometry(1, 1)
@@ -145,22 +96,22 @@
             const plane = new Gfx.Mesh(planeGeometry, this.planeMaterial)
             plane.position.set(0, 0, 0);
             plane.scale.set(1, 1, 1);
-            //scene.add(plane)
+            //this.scene.add(plane)
 
-            scene.background = new Gfx.Color(0x000000);
+            this.scene.background = new Gfx.Color(0x000000);
 
             // Add lights so MeshLambertMaterial renders colored bars (not black).
             const ambientLight = new Gfx.AmbientLight(0xffffff, 0.6);
-            scene.add(ambientLight);
+            this.scene.add(ambientLight);
             
             const dirLight = new Gfx.DirectionalLight(0xffffff, 0.8);
             dirLight.position.set(0, 5, 10);
-            scene.add(dirLight);
+            this.scene.add(dirLight);
 
             const rendererPass = this.renderer.addRenderPass({
                 name: 'main',
-                scene,
-                camera,
+                scene: this.scene,
+                camera: this.camera,
                 loop: (time: DOMHighResTimeStamp, frame: XRFrame) => {
                     
                 }
@@ -175,9 +126,7 @@
             });
 
             rendererPass.addPlugin(ObjectPicker);
-            rendererPass.addPlugin(ChartObjectManipulator, {
-                chart: chart,
-            });
+            rendererPass.addPlugin(ChartObjectManipulator);
             //rendererPass.addPlugin(ChartGridLabelsPlugin, {
             //    chart: chart,
             //});
@@ -280,7 +229,7 @@
         }
     }
 
-    export default toNative(Canvas3D);
+    export default toNative(VCanvas3D);
 
 </script>
 
