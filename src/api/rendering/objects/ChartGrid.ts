@@ -62,29 +62,33 @@ export class ChartGrid extends Gfx.Object3D
     private lastUpdatedFrameId: number = -1;
 
     /**
-     * Returns the horizontal shift of the grid lines based on the chart's scroll position and zoom level.
+     * Returns the world-space X positions of the vertical grid lines.
+     *
+     * Lines are spaced `verticalGridLineDistance` apart and scroll with `scrollX`. The first line
+     * is always within one spacing of the left edge (so it is never missing), and no line is ever
+     * placed outside the chart.
+     *
+     * Both the rendered lines and their labels use this, so they cannot drift apart.
      */
-    public get shiftModuloX(): number {
-        let shiftX = this.chart.scrollX % this.chart.verticalLineDistance / this.chart.zoom;
+    public getVerticalLinePositions(): number[] {
+        const bbox = this.chart.getBBox();
+        const spacing = this.chart.verticalGridLineDistance;
 
-        if (shiftX < 0) {
-            shiftX += this.chart.verticalLineDistance / this.chart.zoom;
-        }
+        if (!Number.isFinite(spacing) || spacing <= 0)
+            return [];
 
-        return shiftX;
-    }
+        // Offset of the first line from the left edge, in [0, spacing).
+        const shift = ((this.chart.scrollX % spacing) + spacing) % spacing;
+        const firstX = bbox.min.x + (spacing - shift) % spacing;
 
-    /**
-     * Returns the vertical shift of the grid lines based on the chart's scroll position and zoom level.
-     */
-    public get shiftModuloY(): number {
-        let shiftY = this.chart.scrollY % this.chart.horizontalLineDistance / this.chart.zoom;
+        // One extra slot covers the case where a line lands exactly on the right edge.
+        const maxLines = this.chart.numVerticalLines + 1;
+        const positions: number[] = [];
 
-        if (shiftY < 0) {
-            shiftY += this.chart.horizontalLineDistance / this.chart.zoom;
-        }
+        for (let x = firstX; x <= bbox.max.x + 1e-9 && positions.length < maxLines; x += spacing)
+            positions.push(x);
 
-        return shiftY;
+        return positions;
     }
 
     /**
@@ -114,11 +118,6 @@ export class ChartGrid extends Gfx.Object3D
     );
 
     /**
-     * Cube that represents the bounding box of the chart.
-     */
-    public gfxGridCube: Gfx.Mesh = new Gfx.Mesh(new Gfx.BoxGeometry(1, 1, 1), new Gfx.MeshBasicMaterial({ color: 0x000000, side: Gfx.BackSide }));
-
-    /**
      * Container for all the labels of the chart grid.
      */
     private labelsDOM: HTMLDivElement = document.createElement('div');
@@ -139,6 +138,29 @@ export class ChartGrid extends Gfx.Object3D
     private labelsVerticalLinesBottomDOM: HTMLDivElement = document.createElement('div');
 
     /**
+     * Labels for the last-price lines of each price indicator.
+     */
+    private labelsLastPriceDOM: HTMLDivElement = document.createElement('div');
+
+    /**
+     * Tooltip shown when hovering over a last-price label.
+     */
+    private domLastPriceHover: HTMLDivElement = document.createElement('div');
+
+    /**
+     * Whether the last-price tooltip has been attached to the document.
+     */
+    private lastPriceHoverAttached: boolean = false;
+
+    /**
+     * Moves the last-price tooltip next to the mouse cursor.
+     */
+    private positionLastPriceHover = (event: MouseEvent): void => {
+        this.domLastPriceHover.style.left = `${event.pageX + 10}px`;
+        this.domLastPriceHover.style.top = `${event.pageY + 10}px`;
+    };
+
+    /**
      * Construtor.
      */
     public constructor(chart: Chart) {
@@ -148,15 +170,14 @@ export class ChartGrid extends Gfx.Object3D
 
         this.gfxGridLines.frustumCulled = false;
 
-        this.add(this.gfxGridCube);
         this.add(this.gfxGridLines);
     }
 
     /**
      * Layouts the grid lines of the chart. This will be called whenever the chart is updated.
-     * 
-     * Lines will be laid out based on the chart's bounding box. The grid lines will be laid out in
-     * the x-axis and y-axis, scrolled by gridLinesShiftX and gridLinesShiftY respectively.
+     *
+     * The chart is flat (2D), so the grid consists of horizontal and vertical lines only, all
+     * lying in the z = 0 plane. Horizontal lines scroll vertically, vertical lines horizontally.
      */
     public layoutGridLines(): void {
         if (!this.chart) {
@@ -172,19 +193,19 @@ export class ChartGrid extends Gfx.Object3D
         if (!Number.isFinite(chartWidth) || !Number.isFinite(chartHeight) || chartWidth <= 0 || chartHeight <= 0)
             return;
 
-        const numLinesHorizontal   = this.chart.numHorizontalLines;
-        const numLinesVertical = this.chart.numInitialBars;
-        const numLines = numLinesVertical + numLinesHorizontal;
+        const numLinesHorizontal = this.chart.maxHorizontalLines;
+        const verticalLinePositions = this.getVerticalLinePositions();
+        const numLinesVertical   = verticalLinePositions.length;
+        const lastPriceLines     = this.chart.lastPriceLines;
+        const numLines           = numLinesVertical + numLinesHorizontal + lastPriceLines.length;
 
-        const lineDistanceVertical = chartWidth / (numLinesVertical);
-        const lineDistanceHorizontal = chartHeight / (numLinesHorizontal);
+        const lineDistanceHorizontal = chartHeight / numLinesHorizontal;
 
         // Reallocate the GPU buffer only when line counts change.
         if (numLines !== this.numAllocatedGridLines) {
-            const numLinePairsV  = numLinesVertical + 2;
-            const numLinePairsH  = numLinesHorizontal + 2;
-            const totalLinePairs = 3 * numLinePairsV + 2 * numLinePairsH + 5;
-            const requiredBufferLength    = totalLinePairs * 6;
+            // One line pair per grid line, plus the four border edges.
+            const totalLinePairs = numLinesHorizontal + numLinesVertical + lastPriceLines.length + 4;
+            const requiredBufferLength = totalLinePairs * 6;
 
             if (!this.gfxPositionBuffer || requiredBufferLength > this.gfxPositionBuffer.array.length) {
                 this.gfxPositionBuffer = new Gfx.Float32BufferAttribute(new Float32Array(requiredBufferLength), 3);
@@ -203,11 +224,7 @@ export class ChartGrid extends Gfx.Object3D
         if (!this.gfxPositionBuffer)
             return;
 
-        let shiftX = this.chart.scrollX % lineDistanceVertical;
         let shiftY = this.chart.scrollY % lineDistanceHorizontal;
-
-        if (shiftX < 0)
-            shiftX += lineDistanceVertical;
 
         if (shiftY < 0)
             shiftY += lineDistanceHorizontal;
@@ -216,99 +233,42 @@ export class ChartGrid extends Gfx.Object3D
         const arr = this.gfxPositionBuffer.array as Float32Array;
         let idx = 0;
 
-        // Left and right side — horizontal lines scrolled vertically.
+        // Horizontal lines, scrolled vertically.
         for (let i = 0; i < numLinesHorizontal; i++) {
-            const y = bbox.min.y + ((chartHeight * (i / (numLinesHorizontal)) + shiftY) % chartHeight);
-            arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
-            arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.max.z;
-            arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
-            arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.max.z;
+            const y = bbox.min.y + ((chartHeight * (i / numLinesHorizontal) + shiftY) % chartHeight);
+            arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = 0;
+            arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = 0;
         }
 
-        // Back face — horizontal lines scrolled vertically.
-        for (let i = 0; i < numLinesHorizontal; i++) {
-            const y = bbox.min.y + ((chartHeight * (i / (numLinesHorizontal)) + shiftY)) % chartHeight;
-            arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
-            arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = bbox.min.z;
+        // Vertical lines, scrolled horizontally. Only every `verticalLineStride`-th bar gets a line,
+        // so the spacing is `verticalGridLineDistance`. Positions are clamped to the chart, so no
+        // line is ever drawn outside of it.
+        for (const x of verticalLinePositions) {
+            arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = 0;
+            arr[idx++] = x; arr[idx++] = bbox.max.y; arr[idx++] = 0;
         }
 
-        // Back face — vertical lines scrolled horizontally.
-        for (let i = 0; i < numLinesVertical; i++) {
-            const x = bbox.min.x + lineDistanceVertical + ((chartWidth * (i / (numLinesVertical)) - shiftX) % chartWidth);
-            arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
-            arr[idx++] = x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
+        // One extra horizontal line per price indicator, marking its last value.
+        for (const line of lastPriceLines) {
+            arr[idx++] = bbox.min.x; arr[idx++] = line.worldY; arr[idx++] = 0;
+            arr[idx++] = bbox.max.x; arr[idx++] = line.worldY; arr[idx++] = 0;
         }
 
-        // Floor — depth lines using the same x positions as the front vertical lines,
-        // scrolled identically. Lines that land on the left or right wall are suppressed.
-        for (let i = 0; i < numLinesVertical; i++) {
-            const x = bbox.min.x + lineDistanceVertical + ((chartWidth * (i / (numLinesVertical)) - shiftX) % chartWidth);
-            arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
-            arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-        }
+        // Border edges: top, bottom, left and right.
+        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = 0;
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = 0;
 
-        // Additional horizontal line at the very top edge of the chart.
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
+        arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = 0;
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = 0;
 
-        // Additional horizontal line at the very top, back edge of the chart.
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
+        arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = 0;
+        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = 0;
 
-        // Additional horizontal line at the very bottom edge of the chart.
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-
-        // Right side — additional horizontal line at the very top edge of the chart.
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
-
-        // Right side — additional horizontal line at the very bottom edge of the chart.
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-
-        // Left side — additional vertical line at the left.
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
-
-        // Right side — additional vertical line at the right.
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.min.z;
-        
-        // Bottom back — additional horizontal line at the very bottom edge of the chart.
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.min.z;
-
-        // Back/top corner edges (static structural bounds, not grid lines).
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = bbox.max.z;
-
-        arr[idx++] = bbox.min.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
-        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = bbox.max.z;
-
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.min.y; arr[idx++] = 0;
+        arr[idx++] = bbox.max.x; arr[idx++] = bbox.max.y; arr[idx++] = 0;
 
         this.gfxPositionBuffer.needsUpdate = true;
         this.gfxGridLines.geometry.setDrawRange(0, idx / 3);
-
-        // Positioning the grid cube to match the chart's bounding box.
-        const padding = 0.0001;
-
-        this.gfxGridCube.position.set(
-            (bbox.min.x + bbox.max.x) / 2,
-            (bbox.min.y + bbox.max.y) / 2,
-            (bbox.min.z + bbox.max.z) / 2
-        );
-
-        this.gfxGridCube.scale.set(
-            chartWidth  + padding,
-            chartHeight + padding,
-            bbox.max.z - bbox.min.z + padding
-        );
     }
 
     /**
@@ -339,7 +299,7 @@ export class ChartGrid extends Gfx.Object3D
         label.style.verticalAlign = 'middle';
         label.style.fontSize = '12px';
         label.style.color = '#777';
-        label.textContent = '12.34';
+        label.textContent = '';
 
         // Positioning label based on its type.
         if (labelType === 'horizontal-left') {
@@ -481,11 +441,24 @@ export class ChartGrid extends Gfx.Object3D
     } 
 
     /**
+     * Formats the text of a horizontal grid line label for the given world-space Y coordinate.
+     *
+     * Price charts show the price at that level, using the symbol's precision. Charts without a
+     * price indicator show the 0..100 indicator value instead.
+     */
+    private formatHorizontalLabel(worldY: number): string {
+        if (this.chart.hasPriceIndicator)
+            return this.chart.worldYToPrice(worldY).toFixed(this.chart.priceDigits);
+
+        return (worldY / this.chart.chartHeight * 100).toFixed(2);
+    }
+
+    /**
      * Updates the labels of the chart grid.
      */
     public updateLabels(): void {
         // Ensuring capacity for the horizontal line labels on the left and right side of the chart.
-        for (let i = this.labelsHorizontalLinesLeftDOM.childElementCount; i <= this.chart.numHorizontalLines; i++) {
+        for (let i = this.labelsHorizontalLinesLeftDOM.childElementCount; i <= this.chart.maxHorizontalLines; i++) {
             let labelLeft = document.createElement('div');
             let labelRight = document.createElement('div');
             this.setLabelStyle(labelLeft, 'horizontal-left');
@@ -496,7 +469,7 @@ export class ChartGrid extends Gfx.Object3D
         }
 
         // Removing excessive horizontal line labels on the left and right side of the chart.
-        while (this.labelsHorizontalLinesLeftDOM.childElementCount > this.chart.numHorizontalLines) {
+        while (this.labelsHorizontalLinesLeftDOM.childElementCount > this.chart.maxHorizontalLines) {
             let label = this.labelsHorizontalLinesLeftDOM.lastChild;
             if (label && label.parentElement) {
                 label.parentElement.removeChild(label);
@@ -509,7 +482,10 @@ export class ChartGrid extends Gfx.Object3D
         }
 
         // Ensuring capacity for the vertical line labels at the bottom of the chart.
-        for (let i = this.labelsVerticalLinesBottomDOM.childElementCount; i <= this.chart.numInitialBars; i++) {
+        // One extra label covers the case where a line lands exactly on the right edge.
+        const numVerticalLabels = this.chart.numVerticalLines + 1;
+
+        for (let i = this.labelsVerticalLinesBottomDOM.childElementCount; i < numVerticalLabels; i++) {
             const label = document.createElement('div');
             this.setLabelStyle(label, 'vertical');
             this.setVerticalLineLabel(i, '2 may 2027');
@@ -517,8 +493,27 @@ export class ChartGrid extends Gfx.Object3D
         }
         
         // Removing excessive vertical line labels at the bottom of the chart.
-        while (this.labelsVerticalLinesBottomDOM.childElementCount > this.chart.numInitialBars + 1) {
+        while (this.labelsVerticalLinesBottomDOM.childElementCount > numVerticalLabels) {
             let label = this.labelsVerticalLinesBottomDOM.lastChild;
+            if (label && label.parentElement) {
+                label.parentElement.removeChild(label);
+            }
+        }
+
+        // Ensuring capacity for the last-price labels of each price indicator.
+        const numLastPriceLabels = this.chart.lastPriceLines.length;
+
+        for (let i = this.labelsLastPriceDOM.childElementCount; i < numLastPriceLabels; i++) {
+            const label = document.createElement('div');
+            this.setLabelStyle(label, 'horizontal-right');
+            label.style.pointerEvents = 'auto';
+            label.style.cursor = 'default';
+            this.labelsLastPriceDOM.appendChild(label);
+        }
+
+        // Removing excessive last-price labels.
+        while (this.labelsLastPriceDOM.childElementCount > numLastPriceLabels) {
+            const label = this.labelsLastPriceDOM.lastChild;
             if (label && label.parentElement) {
                 label.parentElement.removeChild(label);
             }
@@ -536,6 +531,10 @@ export class ChartGrid extends Gfx.Object3D
 
         if (this.labelsVerticalLinesBottomDOM.parentElement === null) {
             this.labelsDOM.appendChild(this.labelsVerticalLinesBottomDOM);
+        }
+
+        if (this.labelsLastPriceDOM.parentElement === null) {
+            this.labelsDOM.appendChild(this.labelsLastPriceDOM);
         }
 
         // Adding labels container to the document if it hasn't been added already.
@@ -557,7 +556,7 @@ export class ChartGrid extends Gfx.Object3D
         // Using the same (unzoomed) line spacing and scroll remainder as layoutGridLines() so the
         // labels line up exactly with the rendered grid lines.
         const chartHeight = this.chart.chartHeight;
-        const numLinesHorizontal = this.chart.numHorizontalLines;
+        const numLinesHorizontal = this.chart.maxHorizontalLines;
         const lineDistanceHorizontal = chartHeight / numLinesHorizontal;
 
         let shiftY = this.chart.scrollY % lineDistanceHorizontal;
@@ -565,7 +564,7 @@ export class ChartGrid extends Gfx.Object3D
             shiftY += lineDistanceHorizontal;
 
         // Bars are rendered offset by scrollY (see Chart.updateScroll()), so a line drawn at a given
-        // world-space level currently shows whatever bar price is `scrollY` below its own price.
+        // world-space level currently shows whatever price is `scrollY` below its own price.
         // Reversing that offset (rather than deriving it from the on-screen, sliding `y`) is what
         // keeps a label's value fixed while it slides, only stepping once scrollY has advanced a
         // full line distance — i.e. exactly when a new line takes its place.
@@ -584,9 +583,16 @@ export class ChartGrid extends Gfx.Object3D
             const labelAlpha = this.computeEdgeFadeAlphaLabels(distToEdgeY, this.chart.initialHorizontalLineDistance);
 
             // The real price at this line's absolute level, fixed until scrolling overflows a full line distance.
-            const price = (bbox.min.y + (i - scrolledLevels) * lineDistanceHorizontal).toFixed(5);
+            const price = this.formatHorizontalLabel(bbox.min.y + (i - scrolledLevels) * lineDistanceHorizontal);
 
-            this._tempVector.set(bbox.min.x, y, bbox.max.z);
+            // Without a price indicator there is no price axis, so the horizontal labels are hidden.
+            if (!this.chart.hasPriceIndicator) {
+                this.applyLabelState(labelLeft, 0, 0, 0, false, '');
+                this.applyLabelState(labelRight, 0, 0, 0, false, '');
+                continue;
+            }
+
+            this._tempVector.set(bbox.min.x, y, 0);
             this._tempVector.applyMatrix4(this.chart.matrixWorld);
             this._tempVector.project(RendererRenderPass.Current!.camera!.native);
 
@@ -601,7 +607,7 @@ export class ChartGrid extends Gfx.Object3D
                 this.applyLabelState(labelLeft, 0, 0, labelAlpha, false, price);
             }
 
-            this._tempVector.set(bbox.max.x, y, bbox.max.z);
+            this._tempVector.set(bbox.max.x, y, 0);
             this._tempVector.applyMatrix4(this.chart.matrixWorld);
             this._tempVector.project(RendererRenderPass.Current!.camera!.native);
 
@@ -618,11 +624,16 @@ export class ChartGrid extends Gfx.Object3D
         }
 
         // Position vertical labels on the top and bottom sides of the chart.
-        for (let i = 1; i <= this.chart.numInitialBars; i++) {
+        // Uses the exact same positions as layoutGridLines(), so labels always sit on their lines.
+        const verticalLinePositions = this.getVerticalLinePositions();
+
+        for (let i = 0; i < verticalLinePositions.length; i++) {
             const label = this.labelsVerticalLinesBottomDOM.children[i] as HTMLDivElement;
-            
-            const x = bbox.min.x + i * (bbox.max.x - bbox.min.x) / this.chart.numInitialBars;
-            const effectiveX = x - (this.shiftModuloX * this.chart.zoom);
+
+            if (!label)
+                continue;
+
+            const effectiveX = verticalLinePositions[i];
 
             // Fade out the label as it approaches the left or right edge of the chart, same as the grid lines.
             const distToEdgeX = Math.min(effectiveX - bbox.min.x, bbox.max.x - effectiveX);
@@ -630,7 +641,7 @@ export class ChartGrid extends Gfx.Object3D
 
             const dateText = this.getNearestBarDateLabel(effectiveX);
 
-            this._tempVector.set(effectiveX, bbox.min.y, bbox.max.z);
+            this._tempVector.set(effectiveX, bbox.min.y, 0);
             this._tempVector.applyMatrix4(this.chart.matrixWorld);
             this._tempVector.project(RendererRenderPass.Current!.camera!.native);
 
@@ -645,6 +656,86 @@ export class ChartGrid extends Gfx.Object3D
                 this.applyLabelState(label, 0, 0, labelAlpha, false, dateText);
             }
         }
+
+        this.updateLastPriceLabels(bbox, clientWidth, clientHeight);
+    }
+
+    /**
+     * Positions the last-price labels of each price indicator on the right side of the chart and
+     * wires up their hover tooltip.
+     */
+    private updateLastPriceLabels(bbox: Gfx.Box3, clientWidth: number, clientHeight: number): void {
+        const lastPriceLines = this.chart.lastPriceLines;
+
+        // The tooltip is only attached once, and only when there is something to hover.
+        if (lastPriceLines.length > 0 && !this.lastPriceHoverAttached) {
+            this.domLastPriceHover.classList.add('chart-tooltip');
+            this.domLastPriceHover.style.display = 'none';
+            document.body.appendChild(this.domLastPriceHover);
+            document.addEventListener('mousemove', this.positionLastPriceHover);
+            this.lastPriceHoverAttached = true;
+        }
+
+        for (let i = 0; i < lastPriceLines.length; i++) {
+            const label = this.labelsLastPriceDOM.children[i] as HTMLDivElement | undefined;
+
+            if (!label)
+                continue;
+
+            const line = lastPriceLines[i];
+
+            // The label follows the line, which is fixed in world space (it does not scroll).
+            this._tempVector.set(bbox.max.x, line.worldY, 0);
+            this._tempVector.applyMatrix4(this.chart.matrixWorld);
+            this._tempVector.project(RendererRenderPass.Current!.camera!.native);
+
+            const visible = this._tempVector.z <= 1;
+            const text = line.value.toFixed(this.chart.priceDigits);
+
+            if (visible) {
+                const screenX = (this._tempVector.x + 1) * 0.5 * clientWidth;
+                const screenY = (1 - this._tempVector.y) * 0.5 * clientHeight;
+
+                this.applyLabelState(label, screenX, screenY, 1, true, text);
+            }
+            else {
+                this.applyLabelState(label, 0, 0, 0, false, text);
+            }
+
+            // Color the label like its indicator so it can be told apart from the grid labels.
+            const colorCss = `#${line.color.toString(16).padStart(6, '0')}`;
+
+            if (label.dataset.color !== colorCss) {
+                label.style.color = colorCss;
+                label.dataset.color = colorCss;
+            }
+
+            // The handler is installed once per label and resolves the line by index at hover time,
+            // so it always shows the current value instead of a stale closure.
+            if (label.dataset.hoverBound !== '1') {
+                label.dataset.hoverBound = '1';
+
+                label.addEventListener('mouseenter', () => {
+                    const current = this.chart.lastPriceLines[Number(label.dataset.lineIndex ?? -1)];
+
+                    if (!current)
+                        return;
+
+                    this.domLastPriceHover.innerHTML =
+                        `Indicator: ${current.name}<br>Last value: ${current.value.toFixed(this.chart.priceDigits)}`;
+                    this.domLastPriceHover.style.display = 'block';
+                });
+
+                label.addEventListener('mouseleave', () => {
+                    this.domLastPriceHover.style.display = 'none';
+                });
+            }
+
+            label.dataset.lineIndex = String(i);
+        }
+
+        if (lastPriceLines.length === 0 && this.lastPriceHoverAttached)
+            this.domLastPriceHover.style.display = 'none';
     }
 
     /**
@@ -690,6 +781,27 @@ export class ChartGrid extends Gfx.Object3D
 
             col[vi * 4]     = r; col[vi * 4 + 1]     = g; col[vi * 4 + 2]     = b; col[vi * 4 + 3]     = alpha;
             col[(vi+1) * 4] = r; col[(vi+1) * 4 + 1] = g; col[(vi+1) * 4 + 2] = b; col[(vi+1) * 4 + 3] = alpha;
+        }
+
+        // Last-price lines are drawn after the horizontal and vertical grid lines. They use the
+        // indicator's own color and are never faded, so they stay readable at the chart edges.
+        const lastPriceLines = this.chart.lastPriceLines;
+        const lastPriceStartVertex = (this.chart.maxHorizontalLines + this.getVerticalLinePositions().length) * 2;
+
+        for (let i = 0; i < lastPriceLines.length; i++) {
+            const vi = lastPriceStartVertex + i * 2;
+
+            if (vi + 1 >= vertexCount)
+                break;
+
+            const color = lastPriceLines[i].color;
+
+            const lr = ((color >> 16) & 0xff) / 0xff;
+            const lg = ((color >> 8) & 0xff) / 0xff;
+            const lb = (color & 0xff) / 0xff;
+
+            col[vi * 4]     = lr; col[vi * 4 + 1]     = lg; col[vi * 4 + 2]     = lb; col[vi * 4 + 3]     = 1.0;
+            col[(vi+1) * 4] = lr; col[(vi+1) * 4 + 1] = lg; col[(vi+1) * 4 + 2] = lb; col[(vi+1) * 4 + 3] = 1.0;
         }
 
         this.gfxColorBuffer.needsUpdate = true;

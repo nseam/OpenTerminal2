@@ -41,6 +41,9 @@ Example of how the horizontal lines placement should work:
   - Absolute price difference = 0.02310
   - Number of horizontal lines: 20, now we divide the price difference by number of horizontal lines. Result is `0.02310/20 = 0.001155`.
   - Because `symbol_digits` for the first price indicator is `5` that means that our price precision is `0.00001`.
-  - Price step was calculated as `0.001155`. If the price step precision is larger than symbol's precision then we round up the price step with the symbols precision, i.e. we will convert `0.001155` into `0.00120`.
+  - Price step was calculated as `0.001155`. If the price step precision is larger than symbol's precision then we round up the price step with the symbols precision, i.e. we will convert `0.001155` into `0.00116`.
   - Now we need to adjust our initially calculated upper and lower price by rounding it up/down via calculated price step. That would mean that each horizontal line will have the same price difference between another line.
 
+For all other indicators, let them be drawn as they are 0-100 i.e. 0% - 100% indicators, so they just don't expand vertically on the chart beyond the chart. They need to have static vertical position and not be scrolled vertically. Then value 0 means that it's bar/line/point should be at the bottom of the chart grid and value 100 should be at the top of the chart. We will change that rule later, because there could be indicators returning other ranges of values.
+
+Ensure that for non-price indicators, 

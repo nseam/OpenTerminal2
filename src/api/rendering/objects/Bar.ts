@@ -102,8 +102,8 @@ export class Bar
      * The box geometry is a unit cube (1×1×1); scale is applied via the matrix's 
      * scaling component so that InstancedMesh renders bars of different heights.
      *
-     * @param _chartWidth  Chart width in world units (used for Y-to-world conversion).
-     * @param _boxHeight   The original raw OHLC height (deprecated — use _scaleBoxY instead).
+     * @param _chartWidth  Chart width in world units (unused — kept for call-site compatibility).
+     * @param _boxHeight   Body height in world units (unused — `_scaleBoxY` already holds it).
      */
     public updateMatrix(_chartWidth: number, _boxHeight: number): void {
         // Use normalized coordinates relative to BBox (0-1 range).

@@ -5,7 +5,24 @@ import { Renderer } from './../Renderer';
 import { type TesterValuesColumns } from 'fx31337-wasm/lib/types/TesterValuesColumns';
 import { type TesterIndicatorInfo } from 'fx31337-wasm/lib/types/TesterIndicatorInfo';
 import { type IndicatorDataEntry } from 'fx31337-wasm/lib/types/IndicatorDataEntry';
+import { ENUM_IDATA_VALUE_RANGE } from 'fx31337-wasm/lib/types/enums/ENUM_IDATA_VALUE_RANGE';
 import { Bar } from './Bar';
+
+/**
+ * A horizontal line marking the last value of a single price indicator.
+ */
+export interface ChartLastPriceLine {
+    /** The series the value comes from. */
+    series: Series;
+    /** Name of the indicator. */
+    name: string;
+    /** The last value (the close price for OHLC indicators). */
+    value: number;
+    /** World-space Y coordinate of the line inside the chart. */
+    worldY: number;
+    /** Line color as 0xRRGGBB. */
+    color: number;
+}
 
 export class Chart extends Gfx.Object3D
 {
@@ -50,14 +67,104 @@ export class Chart extends Gfx.Object3D
     public barSpacing: number = 0.05;
 
     /**
-     * The vertical scale factor for the bars in the chart. This will be used to scale the height of the bars.
+     * Fixed height of the chart in world units. The chart's vertical extent never depends on the
+     * data any more — indicator values are mapped into this range instead.
      */
-    public barScaleY: number = 1;
+    public fixedChartHeight: number = 1.0;
 
     /**
-     * Number of horizontal grid lines in the chart.
+     * Number of horizontal grid lines in the chart. There are always exactly this many lines.
      */
-    public numHorizontalLines: number = 10;
+    public maxHorizontalLines: number = 20;
+
+    /**
+     * Maximum number of vertical grid lines (and their labels) drawn on the chart. The actual
+     * number can be lower when `minVerticalLineDistance` does not allow that many lines to fit.
+     */
+    public maxVerticalLines: number = 20;
+
+    /**
+     * Minimum distance between two adjacent vertical grid lines, in world units. This keeps the
+     * lines and their labels from overlapping when the chart is narrow or zoomed out.
+     */
+    public minVerticalLineDistance: number = 0.05;
+
+    /**
+     * Number of bars between two adjacent vertical grid lines. Chosen so that neither
+     * `maxVerticalLines` nor `minVerticalLineDistance` is exceeded.
+     *
+     * This is derived from the number of *visible* bars, so zooming out (which shows more bars)
+     * automatically widens the stride and the line count never exceeds `maxVerticalLines`.
+     */
+    public get verticalLineStride(): number {
+        const numBars = this.numBarsVisible;
+
+        if (numBars <= 0)
+            return 1;
+
+        const barSpacingWorld = this.chartWidth / numBars;
+
+        // Enough bars per line to stay within the maximum line count.
+        const strideByCount = Math.ceil(numBars / Math.max(1, this.maxVerticalLines));
+
+        // Enough bars per line to keep the lines at least `minVerticalLineDistance` apart.
+        const strideByDistance = barSpacingWorld > 0 && this.minVerticalLineDistance > 0
+            ? Math.ceil(this.minVerticalLineDistance / barSpacingWorld)
+            : 1;
+
+        return Math.max(1, strideByCount, strideByDistance);
+    }
+
+    /**
+     * Number of vertical grid lines actually drawn on the chart.
+     */
+    public get numVerticalLines(): number {
+        const numBars = this.numBarsVisible;
+
+        if (numBars <= 0)
+            return 0;
+
+        return Math.ceil(numBars / this.verticalLineStride);
+    }
+
+    /**
+     * Distance between two adjacent vertical grid lines, in world units.
+     */
+    public get verticalGridLineDistance(): number {
+        const numBars = this.numBarsVisible;
+
+        if (numBars <= 0)
+            return 0;
+
+        return this.verticalLineStride * this.chartWidth / numBars;
+    }
+
+    /**
+     * Lowest price of the initial price window. Aligned to a multiple of `priceStep`.
+     */
+    public priceMin: number = 0;
+
+    /**
+     * Highest price of the initial price window. Always `priceMin + maxHorizontalLines * priceStep`.
+     */
+    public priceMax: number = 1;
+
+    /**
+     * Price difference between two adjacent horizontal lines.
+     */
+    public priceStep: number = 0;
+
+    /**
+     * Number of decimal digits used to display prices. Taken from the `symbol_digits` of the first
+     * price indicator, because a chart only ever displays a single symbol.
+     */
+    public priceDigits: number = 5;
+
+    /**
+     * Whether the chart contains at least one price indicator. When false, the chart has no price
+     * axis and non-price indicators are mapped onto a fixed 0..100 range.
+     */
+    public hasPriceIndicator: boolean = false;
 
     /**
      * The width of the chart. This is calculated based on the bounding box of the chart.
@@ -67,10 +174,10 @@ export class Chart extends Gfx.Object3D
     }
 
     /**
-     * The height of the bars in the chart. This is calculated based on the bounding box of the chart.
+     * The height of the chart. This is a fixed value — see `fixedChartHeight`.
      */
     public get chartHeight(): number {
-        return this.getBBox().max.y - this.getBBox().min.y;
+        return this.fixedChartHeight;
     }
 
     /**
@@ -84,7 +191,7 @@ export class Chart extends Gfx.Object3D
      * Current horizontal distance between grid lines, based on the bar width and spacing.
      */
     public get horizontalLineDistance(): number {
-        return (this.chartHeight / this.numHorizontalLines) * this.zoom;
+        return (this.chartHeight / this.maxHorizontalLines) * this.zoom;
     }
 
     /**
@@ -98,7 +205,167 @@ export class Chart extends Gfx.Object3D
      * The initial (zoom x1) horizontal distance between grid lines, based on the bar width and spacing.
      */
     public get initialHorizontalLineDistance(): number {
-        return this.chartHeight / this.numHorizontalLines;
+        return this.chartHeight / this.maxHorizontalLines;
+    }
+
+    /**
+     * Returns true if the given indicator value range represents prices (or price differences),
+     * i.e. values that belong on the chart's price axis.
+     */
+    public static isPriceValueRange(valueRange: ENUM_IDATA_VALUE_RANGE | undefined | null): boolean {
+        return valueRange === ENUM_IDATA_VALUE_RANGE.IDATA_RANGE_PRICE ||
+            valueRange === ENUM_IDATA_VALUE_RANGE.IDATA_RANGE_PRICE_DIFF ||
+            valueRange === ENUM_IDATA_VALUE_RANGE.IDATA_RANGE_PRICE_ON_SIGNAL;
+    }
+
+    /**
+     * Converts a price into a world-space Y coordinate inside the chart.
+     */
+    public priceToWorldY(price: number): number {
+        if (!this.hasPriceIndicator || this.priceMax <= this.priceMin)
+            return 0;
+
+        return (price - this.priceMin) / (this.priceMax - this.priceMin) * this.chartHeight;
+    }
+
+    /**
+     * Converts a world-space Y coordinate inside the chart back into a price.
+     */
+    public worldYToPrice(worldY: number): number {
+        if (!this.hasPriceIndicator || this.priceMax <= this.priceMin)
+            return 0;
+
+        return this.priceMin + (worldY / this.chartHeight) * (this.priceMax - this.priceMin);
+    }
+
+    /**
+     * Converts a non-price indicator value (0..100) into a world-space Y coordinate inside the
+     * chart. Value 0 sits at the bottom of the chart, value 100 at the top.
+     */
+    public valueToWorldY(value: number): number {
+        return value / 100 * this.chartHeight;
+    }
+
+    /**
+     * Returns the series whose indicator name matches the given indicator type id, or null.
+     *
+     * The wasm layer names indicators like `(42) MA`, while the UI knows them as `MA`, so the
+     * leading `(index) ` prefix is stripped before comparing. Series order does not match the
+     * configured indicator order, so matching by name is the only reliable option.
+     */
+    public findSeriesByIndicatorType(typeId: string): Series | null {
+        for (const series of this.series) {
+            const name = series.data?.indicator_info?.name;
+
+            if (!name)
+                continue;
+
+            if (Chart.stripIndicatorIndex(name) === typeId)
+                return series;
+        }
+
+        return null;
+    }
+
+    /**
+     * Removes the `(index) ` prefix the wasm layer puts in front of indicator names.
+     */
+    public static stripIndicatorIndex(name: string): string {
+        return name.replace(/^\(\d+\)\s*/, '');
+    }
+
+    /**
+     * Shows or hides the series belonging to the given indicator type.
+     *
+     * Hidden series are skipped by rendering and by the last-price lines, so they disappear from
+     * the chart entirely without losing their data.
+     */
+    public setSeriesVisible(typeId: string, visible: boolean): void {
+        let changed = false;
+
+        for (const series of this.series) {
+            const name = series.data?.indicator_info?.name;
+
+            if (!name || Chart.stripIndicatorIndex(name) !== typeId)
+                continue;
+
+            if (series.visible === visible)
+                continue;
+
+            series.visible = visible;
+            changed = true;
+        }
+
+        // Redraw immediately so the change is visible without waiting for the next scroll/zoom.
+        if (changed)
+            this.refreshSeriesData();
+    }
+
+    /**
+     * Assigns an explicit color to the series belonging to the given indicator type.
+     *
+     * Passing null clears the override, so the series falls back to its palette color.
+     */
+    public setSeriesColor(typeId: string, color: number | null): void {
+        let changed = false;
+
+        for (const series of this.series) {
+            const name = series.data?.indicator_info?.name;
+
+            if (!name || Chart.stripIndicatorIndex(name) !== typeId)
+                continue;
+
+            series.setColorOverride(color);
+            changed = true;
+        }
+
+        if (changed)
+            this.refreshSeriesData();
+    }
+
+    /**
+     * Returns one entry per price indicator that has a single value or four values (OHLC).
+     *
+     * The value used is the indicator's last value — the close price for OHLC indicators. Price
+     * indicators with any other number of values are skipped, as their last value cannot be
+     * interpreted as a price.
+     */
+    public get lastPriceLines(): ChartLastPriceLine[] {
+        const result: ChartLastPriceLine[] = [];
+
+        for (const series of this.series) {
+            if (!series.isPriceSeries)
+                continue;
+
+            // Hidden indicators must not contribute a last-price line.
+            if (!series.visible)
+                continue;
+
+            const values = series.lastValues;
+
+            // Only single-value and OHLC indicators have a meaningful last price.
+            if (values.length !== 1 && values.length !== 4)
+                continue;
+
+            // For OHLC indicators the last value is the close price.
+            const value = values.length === 4 ? values[3] : values[0];
+
+            if (!Number.isFinite(value))
+                continue;
+
+            const info = series.data?.indicator_info;
+
+            result.push({
+                series,
+                name: info?.name ?? '',
+                value,
+                worldY: this.priceToWorldY(value),
+                // Use the color the series is actually drawn with, so the line matches the chart.
+                color: series.color,
+            });
+        }
+
+        return result;
     }
 
     /**
@@ -268,6 +535,9 @@ export class Chart extends Gfx.Object3D
         this.cachedOHLC = null;
         this.invalidatedBBox = true;
 
+        // The price window is only ever computed here — scrolling does not change it.
+        this.calculatePriceWindow();
+
         if (this.data) {
             for (let i = 0; i < this.data.length; i++) {
                 if (this.series.length <= i)
@@ -277,10 +547,169 @@ export class Chart extends Gfx.Object3D
                 
                 this.series[i].updateGraphics();
             }
+
+            // Dropping series that no longer have data, e.g. after an indicator was removed or
+            // the roaming state was restored by undo/redo. Without this they would keep drawing
+            // their previous values.
+            while (this.series.length > this.data.length)
+                this.removeSeries(this.series[this.series.length - 1]);
+        }
+        else {
+            // No data at all, so nothing should be drawn.
+            while (this.series.length > 0)
+                this.removeSeries(this.series[this.series.length - 1]);
         }
         
         this.scrollTo(0, 0); // Refresh the chart to reflect the new data.
         this.onDataSet?.();
+    }
+
+    /**
+     * Rounds a number to the given number of decimal digits, removing floating point noise.
+     */
+    private static roundTo(value: number, digits: number): number {
+        const factor = Math.pow(10, digits);
+        return Math.round(value * factor) / factor;
+    }
+
+    /**
+     * Returns the numeric values of an indicator data entry.
+     *
+     * `IndicatorDataEntry.values` is typed as a `CppArray`, but the wasm layer actually hands us a
+     * plain JS array (see `IndicatorDataEntryToVal()` in Tester.h), so it is read defensively.
+     */
+    public static entryValues(entry: IndicatorDataEntry): number[] {
+        const values = (entry as unknown as { values?: unknown }).values;
+
+        return Array.isArray(values) ? values as number[] : [];
+    }
+
+    /**
+     * Infers the number of decimal digits to use for prices when the indicator does not report a
+     * usable `symbol_digits` (the wasm build currently returns 0 for it).
+     *
+     * The guess is based on the price magnitude, which is what distinguishes the usual forex
+     * quoting conventions: 1.09580 (5 digits), 151.234 (3 digits).
+     */
+    private static inferPriceDigits(maxAbsPrice: number): number {
+        if (!Number.isFinite(maxAbsPrice) || maxAbsPrice <= 0)
+            return 5;
+
+        if (maxAbsPrice >= 1000)
+            return 2;
+
+        if (maxAbsPrice >= 100)
+            return 3;
+
+        if (maxAbsPrice >= 10)
+            return 4;
+
+        return 5;
+    }
+
+    /**
+     * Computes the initial price window of the chart from the price indicators in the data.
+     *
+     * The window always spans exactly `maxHorizontalLines` steps, so every horizontal line has the
+     * same price difference to its neighbours. The step is derived from the price range divided by
+     * the number of lines and then rounded up to the symbol's precision, which is taken from the
+     * first price indicator (a chart only ever displays a single symbol).
+     *
+     * Only price indicators (`IDATA_RANGE_PRICE`, `IDATA_RANGE_PRICE_DIFF`,
+     * `IDATA_RANGE_PRICE_ON_SIGNAL`) contribute to the window — every other indicator is drawn on
+     * a fixed 0..100 scale and must not influence the price axis.
+     *
+     * This is only called from `setData()` — scrolling vertically reveals prices outside of this
+     * initial window without changing it.
+     */
+    private calculatePriceWindow(): void {
+        this.hasPriceIndicator = false;
+        this.priceMin = 0;
+        this.priceMax = 100;
+        this.priceStep = 0;
+
+        if (!this.data)
+            return;
+
+        let min: number | null = null;
+        let max: number | null = null;
+        let reportedDigits: number | null = null;
+
+        for (const seriesData of this.data) {
+            const info = seriesData.indicator_info;
+
+            if (!Chart.isPriceValueRange(info?.value_range))
+                continue;
+
+            // The first price indicator defines the precision of every price on the chart.
+            if (reportedDigits === null && Number.isInteger(info.symbol_digits) && info.symbol_digits > 0)
+                reportedDigits = info.symbol_digits;
+
+            for (const entry of seriesData.values) {
+                for (const value of Chart.entryValues(entry)) {
+                    if (!Number.isFinite(value))
+                        continue;
+
+                    if (min === null || value < min)
+                        min = value;
+
+                    if (max === null || value > max)
+                        max = value;
+                }
+            }
+        }
+
+        if (min === null || max === null)
+            return;
+
+        this.hasPriceIndicator = true;
+
+        // Fall back to a magnitude-based guess when the indicator reports no usable precision.
+        const digits = reportedDigits ?? Chart.inferPriceDigits(Math.max(Math.abs(min), Math.abs(max)));
+
+        this.priceDigits = digits;
+
+        const precision = Math.pow(10, -digits);
+        const numLines = this.maxHorizontalLines;
+
+        // Highest price rounded up and lowest price rounded down to the symbol's precision.
+        const upper = Chart.roundTo(Math.ceil(max / precision) * precision, digits);
+        const lower = Chart.roundTo(Math.floor(min / precision) * precision, digits);
+
+        let diff = upper - lower;
+
+        if (diff <= 0) {
+            // Flat data — fall back to one precision unit per line so the window stays usable.
+            diff = precision * numLines;
+        }
+
+        // Raw step, rounded up to the symbol's precision so every line lands on a valid price.
+        let step = Chart.roundTo(Math.ceil((diff / numLines) / precision) * precision, digits);
+
+        if (step <= 0)
+            step = precision;
+
+        // Aligning the window to whole steps keeps the price difference between lines constant.
+        // Aligning the lower bound down can lose up to one step, so the step is grown until the
+        // window covers the rounded upper price again. Recomputing the required step directly
+        // converges in one or two passes.
+        let alignedLower = Chart.roundTo(Math.floor(lower / step) * step, digits);
+        let alignedUpper = Chart.roundTo(alignedLower + step * numLines, digits);
+
+        for (let pass = 0; pass < 8 && alignedUpper < upper; pass++) {
+            const required = (upper - alignedLower) / numLines;
+            step = Chart.roundTo(Math.ceil(required / precision) * precision, digits);
+
+            if (step <= 0)
+                step = precision;
+
+            alignedLower = Chart.roundTo(Math.floor(lower / step) * step, digits);
+            alignedUpper = Chart.roundTo(alignedLower + step * numLines, digits);
+        }
+
+        this.priceStep = step;
+        this.priceMin = alignedLower;
+        this.priceMax = alignedUpper;
     }
 
     /**
@@ -334,46 +763,40 @@ export class Chart extends Gfx.Object3D
         let l: number | null = null;
         let c: number | null = null;
 
-        const hasPriceRangeData = this.data?.some(series =>
-            series.values.some(entry => (entry.values as unknown as number[]).length >= 3)
-        ) ?? false;
-
         if (this.data !== null) {
             // Scan the full dataset so the OHLC range covers all bars, not just the visible window.
             for (let i = 0; i < this.data.length; i++) {
                 for (const entry of this.data[i].values) {
-                    const entryValues = entry.values as unknown as number[];
-                    if (hasPriceRangeData && entryValues.length < 3)
-                        continue;
+                    const values = Chart.entryValues(entry);
 
-                    if (entryValues.length == 4) {
-                        if (o === null || entryValues[0] < o)
-                            o = entryValues[0];
+                    if (values.length == 4) {
+                        if (o === null || values[0] < o)
+                            o = values[0];
 
-                        if (h === null || entryValues[1] > h)
-                            h = entryValues[1];
+                        if (h === null || values[1] > h)
+                            h = values[1];
 
-                        if (l === null || entryValues[2] < l)
-                            l = entryValues[2];
+                        if (l === null || values[2] < l)
+                            l = values[2];
                         
-                        if (c === null || entryValues[3] > c)
-                            c = entryValues[3];
+                        if (c === null || values[3] > c)
+                            c = values[3];
                     }
-                    else {
-                        // Price indicators can expose multiple channels (e.g. upper/lower bands).
-                        for (const value of entryValues) {
-                            if (o === null || value < o)
-                                o = value;
+                    else if (values.length > 0) {
+                        // Calculating OHLC from the first item of entry.values.
+                        const value = values[0];
 
-                            if (h === null || value > h)
-                                h = value;
+                        if (o === null || value < o)
+                            o = value;
 
-                            if (l === null || value < l)
-                                l = value;
+                        if (h === null || value > h)
+                            h = value;
 
-                            if (c === null || value > c)
-                                c = value;
-                        }
+                        if (l === null || value < l)
+                            l = value;
+
+                        if (c === null || value > c)
+                            c = value;
                     }
                 }
             }
@@ -391,7 +814,10 @@ export class Chart extends Gfx.Object3D
     }
 
     /**
-     * Gets the bounding box of the chart. This will be calculated based on the OHLC values of all bars.
+     * Gets the bounding box of the chart. The vertical extent is fixed (see `fixedChartHeight`) and
+     * no longer derived from the data — indicator values are mapped into it instead.
+     *
+     * The chart is flat (2D): it has no depth, so the box spans z = 0 only.
      * 
      * @returns The bounding box of the chart.
      */
@@ -401,22 +827,14 @@ export class Chart extends Gfx.Object3D
 
         const bbox = new Gfx.Box3();
 
-        const ohlc = this.getOHLC();
-
-        // Vertical extent derived from the full price range of the data.
-        bbox.expandByPoint(new Gfx.Vector3(0, ohlc.l, 0));
-        bbox.expandByPoint(new Gfx.Vector3(0, ohlc.h, 0));
+        // Vertical extent is fixed and starts at y = 0.
+        bbox.expandByPoint(new Gfx.Vector3(0, 0, 0));
+        bbox.expandByPoint(new Gfx.Vector3(0, this.chartHeight, 0));
 
         // Horizontal extent — chart is centered at x=0 so bars and grid lines align.
         const chartWidth = this.numBarsVisible * (this.barWidth + this.barSpacing);
-        bbox.expandByPoint(new Gfx.Vector3(-chartWidth / 2, ohlc.l, 0));
-        bbox.expandByPoint(new Gfx.Vector3( chartWidth / 2, ohlc.h, 0));
-
-        if (bbox.min.y == 0 && bbox.max.y == 0) {
-            // Making the bounding to have at least given height.
-            //bbox.expandByPoint(new Gfx.Vector3(-0.01, -0.1, -0.01));
-            //bbox.expandByPoint(new Gfx.Vector3( 0.01,  0.1,  0.01));
-        }
+        bbox.expandByPoint(new Gfx.Vector3(-chartWidth / 2, 0, 0));
+        bbox.expandByPoint(new Gfx.Vector3( chartWidth / 2, 0, 0));
 
         this.bbox = bbox;
         this.invalidatedBBox = false;
@@ -466,14 +884,15 @@ export class Chart extends Gfx.Object3D
         const maxScrollX = this.getMaxScrollX();
         this.targetScrollX = Math.max(0, Math.min(this.targetScrollX, maxScrollX));
 
+        // Without a price indicator there is no price axis to scroll through, so the chart stays put.
+        if (!this.hasPriceIndicator)
+            this.targetScrollY = 0;
+
         // Slowly interpolate the scroll position towards the target to create smooth scrolling.
         this.scrollX += (this.targetScrollX - this.scrollX) * 0.1;
         this.scrollX = Math.max(0, Math.min(this.scrollX, maxScrollX));
         // this.scrollY += (this.targetScrollY - this.scrollY) * 0.01;
         this.scrollY = this.targetScrollY;
-
-        const chartWidth = this.getBBox().max.x - this.getBBox().min.x;
-        const chartHeight = this.getBBox().max.y - this.getBBox().min.y;
 
         // Calculating index of the bar that should be displayed on the left side of the chart. We take into consideration zoom level.
         let barIndex = Math.floor(this.scrollX / this.verticalLineDistance / this.zoom);
@@ -484,7 +903,9 @@ export class Chart extends Gfx.Object3D
 
         for (const series of this.series) {
             series.position.x = -this.chartWidth / 2 - shiftedPositionX;
-            series.position.y = this.targetScrollY;
+            // Only price series follow the vertical scroll — non-price indicators (e.g. 0..100)
+            // keep a static vertical position so they never leave the chart.
+            series.position.y = series.isPriceSeries ? this.targetScrollY : 0;
         }
 
         this.refreshSeriesData();
@@ -557,7 +978,9 @@ export class Chart extends Gfx.Object3D
             index:      0,
             num_values: 4,
             symbol:     'EURUSD',
+            symbol_digits: 5,
             tf:         1,
+            value_range: ENUM_IDATA_VALUE_RANGE.IDATA_RANGE_PRICE,
         } as TesterIndicatorInfo;
 
         return {

@@ -136,7 +136,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         }
 
         const bbox = this.options.chart.getBBox();
-        this.camera.position.set((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 1.2);
+        this.camera.position.set((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 0.8);
         this.camera.lookAt((bbox.min.x + bbox.max.x) / 2, (bbox.min.y + bbox.max.y) / 2, 2);
 
         console.log("Centered camera on chart:", this.options.chart, bbox);

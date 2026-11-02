@@ -1,7 +1,7 @@
 import * as Gfx from 'three';
 import { Bar } from './Bar';
 import { type TesterValuesColumns } from 'fx31337-wasm/lib/types/TesterValuesColumns';
-import { type Chart } from './Chart';
+import { Chart } from './Chart';
 import { Renderer } from './../Renderer';
 
 export enum SeriesType {
@@ -112,6 +112,12 @@ export class Series extends Gfx.Object3D
 
     private static readonly CUBE_PICK_SCALE = 3;
 
+    /**
+     * Depth of the bar boxes. The chart is flat (2D), so this is only large enough to keep the
+     * box geometry from degenerating into zero-area faces.
+     */
+    private static readonly FLAT_DEPTH = 0.0001;
+
     private static readonly VALUE_POINT_PICK_RADIUS_MULTIPLIER = 4;
 
     /** Allocated GPU buffer capacity in number of lines — only grows, never shrinks on zoom. */
@@ -123,6 +129,58 @@ export class Series extends Gfx.Object3D
 
     /** The data for this series, stored as an array of TesterValuesColumns. */
     public data: TesterValuesColumns | null = null;
+
+    /**
+     * Whether this series is drawn on the chart. Hiding a series keeps its data intact, so it can
+     * be shown again without re-running the indicator.
+     */
+    public visible: boolean = true;
+
+    /**
+     * Whether this series holds price values (as opposed to e.g. a 0..100 oscillator). Price series
+     * are mapped onto the chart's price window and follow the vertical scroll; non-price series are
+     * mapped onto a fixed 0..100 range and keep a static vertical position.
+     */
+    public get isPriceSeries(): boolean {
+        return Chart.isPriceValueRange(this.data?.indicator_info?.value_range);
+    }
+
+    /**
+     * Converts a raw indicator value of this series into a world-space Y coordinate inside the chart.
+     */
+    public valueToWorldY(value: number): number {
+        return this.isPriceSeries
+            ? this.chart.priceToWorldY(value)
+            : this.chart.valueToWorldY(value);
+    }
+
+    /**
+     * Returns the values of the most recent bar of this series, or an empty array when there is
+     * no data. For OHLC series the last element is the close price.
+     */
+    public get lastValues(): number[] {
+        const values = this.data?.values;
+
+        if (!values || values.length === 0)
+            return [];
+
+        return Chart.entryValues(values[values.length - 1]);
+    }
+
+    /**
+     * World units per raw indicator value. Price series are mapped onto the chart's price window,
+     * non-price series onto a fixed 0..100 range.
+     */
+    public get unitsPerValue(): number {
+        const chartHeight = this.chart.chartHeight;
+
+        if (!this.isPriceSeries)
+            return chartHeight / 100;
+
+        const priceRange = this.chart.priceMax - this.chart.priceMin;
+
+        return priceRange > 0 ? chartHeight / priceRange : 0;
+    }
 
     /**
      * Index of this series within the chart.
@@ -138,10 +196,91 @@ export class Series extends Gfx.Object3D
     /** Cached Gfx.Color instances for LINE_SERIES_COLORS, built once. */
     private static readonly lineColorCache: Gfx.Color[] = Series.LINE_SERIES_COLORS.map(c => new Gfx.Color(c));
 
+    /**
+     * Explicit color (0xRRGGBB) assigned to this series, or null to derive it from the index.
+     *
+     * An explicit color keeps an indicator's color stable when the indicator list is reordered.
+     */
+    private _colorOverride: number | null = null;
+
+    /**
+     * Sets an explicit color for this series, or clears it when null is given.
+     */
+    public setColorOverride(color: number | null): void {
+        this._colorOverride = color;
+    }
+
+    /**
+     * Parses a `#rrggbb` (or `#rgb`) string into a 0xRRGGBB number, or null when invalid.
+     */
+    public static parseColor(color: string | undefined | null): number | null {
+        if (!color)
+            return null;
+
+        const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim());
+
+        if (!match)
+            return null;
+
+        let hex = match[1];
+
+        if (hex.length === 3)
+            hex = hex.split('').map(c => c + c).join('');
+
+        return parseInt(hex, 16);
+    }
+
+    /**
+     * Formats a 0xRRGGBB number as a `#rrggbb` string.
+     */
+    public static formatColor(color: number): string {
+        return `#${(color & 0xffffff).toString(16).padStart(6, '0')}`;
+    }
+
     /** Returns the predefined color for a given value channel index, cycling through the palette. */
     private static getLineColor(valueIndex: number): Gfx.Color {
         return Series.lineColorCache[valueIndex % Series.lineColorCache.length];
     }
+
+    /**
+     * Returns the color (0xRRGGBB) used to draw the first value channel of the series at the given
+     * index. This is the color the series is actually rendered with, so UI can show a matching
+     * swatch.
+     */
+    public static getSeriesColor(index: number): number {
+        const colors = Series.LINE_SERIES_COLORS;
+
+        return colors[((index % colors.length) + colors.length) % colors.length];
+    }
+
+    /**
+     * The color (0xRRGGBB) this series is drawn with on the chart.
+     */
+    public get color(): number {
+        return this._colorOverride ?? Series.getSeriesColor(this._index);
+    }
+
+    /**
+     * Returns the color for the given value channel of this series.
+     *
+     * The first channel uses the series color (which may be an explicit override); further
+     * channels continue through the palette from there.
+     */
+    private getValueChannelColor(valueIndex: number): Gfx.Color {
+        if (this._colorOverride === null)
+            return Series.getLineColor(valueIndex + this._index);
+
+        if (valueIndex === 0)
+            return this._tempChannelColor.set(this._colorOverride);
+
+        // Continue through the palette, starting after the overridden color's palette slot.
+        const baseIndex = Series.LINE_SERIES_COLORS.indexOf(this._colorOverride);
+
+        return Series.getLineColor(valueIndex + (baseIndex >= 0 ? baseIndex : this._index));
+    }
+
+    /** Scratch color reused by getValueChannelColor(). */
+    private _tempChannelColor: Gfx.Color = new Gfx.Color();
 
     /** Index of the bar currently hovered for Line-type series (no InstancedMesh picking available), or -1 if none. */
     private hoveredBarIndex: number = -1;
@@ -248,9 +387,44 @@ export class Series extends Gfx.Object3D
     }
 
     /**
+     * Stops drawing this series without discarding its data.
+     *
+     * The draw counts are zeroed rather than toggling `Object3D.visible`, because the pick meshes
+     * are already hidden and rely on their own counts for raycasting.
+     */
+    private hideGraphics(): void {
+        if (this.cubeMesh)
+            this.cubeMesh.count = 0;
+
+        if (this.cubePickMesh)
+            this.cubePickMesh.count = 0;
+
+        if (this.gfxLineGeometry)
+            this.gfxLineGeometry.setDrawRange(0, 0);
+
+        if (this.valuePointMesh)
+            this.valuePointMesh.count = 0;
+
+        if (this.valuePointPickMesh)
+            this.valuePointPickMesh.count = 0;
+
+        if (this.hoverCircleMesh)
+            this.hoverCircleMesh.visible = false;
+
+        if (this.selectedPointMesh)
+            this.selectedPointMesh.visible = false;
+    }
+
+    /**
      * Updates the graphics for the series, including layout, instance matrices, and line geometry.
      */
     public updateGraphics(): void {
+        // A hidden series keeps its data but draws nothing.
+        if (!this.visible) {
+            this.hideGraphics();
+            return;
+        }
+
         // Ensures that instanced meshes for cubes and lines have sufficient capacity.
         this.setBarsCapacity(this.chart.numBarsVisible);
 
@@ -565,8 +739,10 @@ export class Series extends Gfx.Object3D
     public layoutBars(): void {
         const bbox = this.chart.getBBox();
         const chartWidth = bbox.max.x - bbox.min.x;
-        const chartHeight = bbox.max.y - bbox.min.y;
-        const centerY = (bbox.min.y + bbox.max.y) / 2;
+
+        // World units per raw indicator value. Price series are mapped onto the chart's price
+        // window, non-price series onto a fixed 0..100 range.
+        const unitsPerValue = this.unitsPerValue;
 
         for (let barIdx = 0; barIdx < this.chart.numBarsVisible; barIdx++) {
             const bar = this.bars[barIdx];
@@ -574,31 +750,34 @@ export class Series extends Gfx.Object3D
             // X position: absolute world space from chart spacing parameters.
             bar.posX = (barIdx + 1) * (this.chart.barWidth + this.chart.barSpacing) * this.chart.zoom;
 
-            if (chartHeight > 0 && centerY !== 0) {
-                // Values are absolute prices and the BBox already spans [low, high], so no BBox offset is added.
-                bar.posY = bar.values[0];
-            } else {
-                bar.posY = 0; // fallback to center when no price range available
-            }
+            // The cube is centred on posY, so a candle body is centred between open and close.
+            if (bar.values.length === 4)
+                bar.posY = this.valueToWorldY((bar.values[0] + bar.values[3]) / 2);
+            else if (bar.values.length > 0)
+                bar.posY = this.valueToWorldY(bar.values[0]);
+            else
+                bar.posY = 0;
 
             bar.posZ = 0;
 
             // Scale values proportional to normalized chart dimensions for consistent rendering at any zoom level.
-            if (chartHeight > 0) {
+            if (chartWidth > 0) {
                 // Width: fraction of visible X range → ~3% per bar with current defaults.
                 bar._scaleWidth = this.chart.barWidth / chartWidth * this.chart.zoom;
-                // Height: raw OHLC range as fraction of total chart height × visibility multiplier (5).
 
+                // Height: the OHLC body height converted into world units.
                 if (bar.values.length === 4)
-                    bar._scaleBoxY = Math.max(bar.values[3] - bar.values[0], 0.01) * this.chart.barScaleY;
+                    bar._scaleBoxY = Math.max(Math.abs(bar.values[3] - bar.values[0]) * unitsPerValue, 0.0001);
                 else
-                    bar._scaleBoxY = 0.01 * this.chart.barScaleY;
+                    bar._scaleBoxY = 0.0001;
 
-                bar._scaleZ = this.chart.barWidth / chartWidth * this.chart.zoom;
+                // The chart is flat (2D), so bars are effectively flat quads. A tiny non-zero
+                // depth keeps the box geometry from degenerating (which would z-fight).
+                bar._scaleZ = Series.FLAT_DEPTH;
             } else {
                 bar._scaleWidth = 0.3;
                 bar._scaleBoxY = 0.3;
-                bar._scaleZ = 0.3;
+                bar._scaleZ = Series.FLAT_DEPTH;
             }
         }
     }
@@ -619,7 +798,7 @@ export class Series extends Gfx.Object3D
             let cubeHeight;
             
             if (bar.values.length === 4)
-                cubeHeight = Math.abs(bar.values[3] - bar.values[0]);
+                cubeHeight = Math.abs(bar.values[3] - bar.values[0]) * this.unitsPerValue;
             else
                 cubeHeight = 0.001;
 
@@ -632,8 +811,10 @@ export class Series extends Gfx.Object3D
 
             this.cubeMesh.setColorAt(barIdx, this._tempColor);
 
-            const barMinY = Math.min(bar.posY, bar.posY + cubeHeight);
-            const barMaxY = Math.max(bar.posY, bar.posY + cubeHeight);
+            // The cube is centred on posY, so its extent is half the body height either side.
+            const halfHeight = cubeHeight / 2;
+            const barMinY = bar.posY - halfHeight;
+            const barMaxY = bar.posY + halfHeight;
 
             const alpha = this.computeEdgeFadeAlpha(bar.posX, barMinY, barMaxY);
 
@@ -683,19 +864,19 @@ export class Series extends Gfx.Object3D
             const bar  = this.bars[barIdx];
             const base = barIdx * 6;
 
-            // Normalize high and low to the same coordinate system as bars.
+            // Map high and low into the same coordinate system as the bars.
             let hNorm;
 
             if (bar.values.length === 4)
-                hNorm = bar.values[1] * this.chart.barScaleY;
+                hNorm = this.valueToWorldY(bar.values[1]);
             else
-                hNorm = bar.values[0] * this.chart.barScaleY;
+                hNorm = this.valueToWorldY(bar.values[0]);
 
             let lNorm;
             if (bar.values.length === 4)
-                lNorm = bar.values[2] * this.chart.barScaleY;
+                lNorm = this.valueToWorldY(bar.values[2]);
             else
-                lNorm = bar.values[0] * this.chart.barScaleY;
+                lNorm = this.valueToWorldY(bar.values[0]);
 
             positions[base + 0] = bar.posX;     positions[base + 1] = hNorm; positions[base + 2] = 0;
             positions[base + 3] = bar.posX;     positions[base + 4] = lNorm; positions[base + 5] = 0;
@@ -752,11 +933,11 @@ export class Series extends Gfx.Object3D
 
         if (numValues > 0) {
             for (let valueIdx = 0; valueIdx < numValues; valueIdx++) {
-                const color = Series.getLineColor(valueIdx + this._index);
+                const color = this.getValueChannelColor(valueIdx);
 
                 for (let barIdx = 0; barIdx < numBars; barIdx++) {
                     const bar = this.bars[barIdx];
-                    const y = (bar.values[valueIdx] ?? 0) * this.chart.barScaleY;
+                    const y = this.valueToWorldY(bar.values[valueIdx] ?? 0);
                     const isActive = (barIdx === this.hoveredBarIndex && valueIdx === this.hoveredValueIndex) ||
                         (barIdx === this.selectedValueBarIndex && valueIdx === this.selectedValueIndex);
 
@@ -774,8 +955,8 @@ export class Series extends Gfx.Object3D
                     const barA = this.bars[barIdx];
                     const barB = this.bars[barIdx + 1];
 
-                    const yA = (barA.values[valueIdx] ?? 0) * this.chart.barScaleY;
-                    const yB = (barB.values[valueIdx] ?? 0) * this.chart.barScaleY;
+                    const yA = this.valueToWorldY(barA.values[valueIdx] ?? 0);
+                    const yB = this.valueToWorldY(barB.values[valueIdx] ?? 0);
 
                     const base = segmentIdx * 6;
 
@@ -843,7 +1024,7 @@ export class Series extends Gfx.Object3D
                 continue;
 
             for (let valueIdx = 0; valueIdx < numValues; valueIdx++) {
-                const y = (bar.values[valueIdx] ?? 0) * this.chart.barScaleY;
+                const y = this.valueToWorldY(bar.values[valueIdx] ?? 0);
                 const dy = y - localPoint.y;
 
                 if (Math.abs(dy) > maxDistY)
@@ -905,7 +1086,7 @@ export class Series extends Gfx.Object3D
         const isActive = (barIndex === this.hoveredBarIndex && valueIndex === this.hoveredValueIndex) ||
             (barIndex === this.selectedValueBarIndex && valueIndex === this.selectedValueIndex);
         const radius = isActive ? Math.min(this.chart.barWidth, this.chart.verticalLineDistance) * 0.12 : 0;
-        const y = (bar.values[valueIndex] ?? 0) * this.chart.barScaleY;
+        const y = this.valueToWorldY(bar.values[valueIndex] ?? 0);
 
         this._tempMatrix.makeScale(radius, radius, 1);
         this._tempMatrix.setPosition(bar.posX, y, 0);
@@ -951,12 +1132,12 @@ export class Series extends Gfx.Object3D
             return;
         }
 
-        const y = (bar.values[this.hoveredValueIndex] ?? 0) * this.chart.barScaleY;
+        const y = this.valueToWorldY(bar.values[this.hoveredValueIndex] ?? 0);
         const radius = Math.min(this.chart.barWidth, this.chart.verticalLineDistance) * 0.2;
 
         this.hoverCircleMesh!.position.set(bar.posX, y, 0);
         this.hoverCircleMesh!.scale.set(radius, radius, 1);
-        this.hoverCircleMaterial!.color.copy(Series.getLineColor(this.hoveredValueIndex + this._index));
+        this.hoverCircleMaterial!.color.copy(this.getValueChannelColor(this.hoveredValueIndex));
         this.hoverCircleMesh!.visible = true;
     }
 
@@ -986,7 +1167,7 @@ export class Series extends Gfx.Object3D
             return;
         }
 
-        const y = (bar.values[this.selectedValueIndex] ?? 0) * this.chart.barScaleY;
+        const y = this.valueToWorldY(bar.values[this.selectedValueIndex] ?? 0);
         const radius = Math.min(this.chart.barWidth, this.chart.verticalLineDistance) * 0.25;
         this.selectedPointMesh.position.set(bar.posX, y, 0);
         this.selectedPointMesh.scale.set(radius, radius, 1);
@@ -1031,7 +1212,9 @@ export class Series extends Gfx.Object3D
                 const row = this.data.values[barIdx + this.chart.startIndex];
                 // `timestamp` is in Unix seconds; bars store milliseconds.
                 const timeMs = Number(row.timestamp) * 1000;
-                bar.setValues(timeMs, row.values);
+                // `values` is typed as a CppArray, but the wasm layer hands us a plain JS array.
+                const values = (row as unknown as { values?: unknown }).values;
+                bar.setValues(timeMs, Array.isArray(values) ? values as number[] : []);
             } else {
                 // If there's no data for this bar, set it to zero values.
                 bar.setValues(0, []);
@@ -1082,12 +1265,12 @@ export class Series extends Gfx.Object3D
             // Update the opacity attribute for this bar based on its fade state.
             if (attributeOpacity) {
                 if (bar.values.length == 4) {
-                    const barMinY = Math.min(bar.posY, bar.posY + (bar.values[3] - bar.values[0]));
-                    const barMaxY = Math.max(bar.posY, bar.posY + (bar.values[3] - bar.values[0]));
-                    attributeOpacity.array[barIndex] = this.computeEdgeFadeAlpha(bar.posX, barMinY, barMaxY);
+                    // The cube is centred on posY, so its extent is half the body height either side.
+                    const halfHeight = Math.abs(bar.values[3] - bar.values[0]) * this.unitsPerValue / 2;
+                    attributeOpacity.array[barIndex] = this.computeEdgeFadeAlpha(bar.posX, bar.posY - halfHeight, bar.posY + halfHeight);
                 }
                 else {
-                    attributeOpacity.array[barIndex] = this.computeEdgeFadeAlpha(bar.posX, bar.values[0], bar.values[0]);
+                    attributeOpacity.array[barIndex] = this.computeEdgeFadeAlpha(bar.posX, bar.posY, bar.posY);
                 }
             }
         }
@@ -1117,6 +1300,10 @@ export class Series extends Gfx.Object3D
      * touching matrices or colors. Called every frame so fading stays in sync with scroll/zoom.
      */
     private updateFade(): void {
+        // A hidden series draws nothing, so there is no fade to recompute.
+        if (!this.visible)
+            return;
+
         if (this.seriesType === SeriesType.Candlestick)
             this.updateCandlestickFade();
         else
@@ -1133,19 +1320,19 @@ export class Series extends Gfx.Object3D
 
             if (attributeOpacity) {
                 if (bar.values.length == 4) {
-                    const barMinY = Math.min(bar.posY, bar.posY + (bar.values[3] - bar.values[0]));
-                    const barMaxY = Math.max(bar.posY, bar.posY + (bar.values[3] - bar.values[0]));
-                    attributeOpacity.array[barIdx] = this.computeEdgeFadeAlpha(bar.posX, barMinY, barMaxY);
+                    // The cube is centred on posY, so its extent is half the body height either side.
+                    const halfHeight = Math.abs(bar.values[3] - bar.values[0]) * this.unitsPerValue / 2;
+                    attributeOpacity.array[barIdx] = this.computeEdgeFadeAlpha(bar.posX, bar.posY - halfHeight, bar.posY + halfHeight);
                 }
                 else {
-                    attributeOpacity.array[barIdx] = this.computeEdgeFadeAlpha(bar.posX, bar.values[0], bar.values[0]);
+                    attributeOpacity.array[barIdx] = this.computeEdgeFadeAlpha(bar.posX, bar.posY, bar.posY);
                 }
             }
 
             if (lineOpacities) {
                 if (bar.values.length == 4) {
-                    const hNorm = bar.values[1] * this.chart.barScaleY;
-                    const lNorm = bar.values[2] * this.chart.barScaleY;
+                    const hNorm = this.valueToWorldY(bar.values[1]);
+                    const lNorm = this.valueToWorldY(bar.values[2]);
                     const lineMinY = Math.min(hNorm, lNorm);
                     const lineMaxY = Math.max(hNorm, lNorm);
                     const lineAlpha = this.computeEdgeFadeAlpha(bar.posX, lineMinY, lineMaxY);
@@ -1155,7 +1342,7 @@ export class Series extends Gfx.Object3D
                     lineOpacities[barIdx * 2 + 1] = lineAlpha;
                 }
                 else {
-                    const lineAlpha = this.computeEdgeFadeAlpha(bar.posX, bar.values[0], bar.values[0]);
+                    const lineAlpha = this.computeEdgeFadeAlpha(bar.posX, bar.posY, bar.posY);
 
                     // Opacity attribute has itemSize 1 (one value per vertex), unlike position/color's itemSize 3.
                     lineOpacities[barIdx * 2 + 0] = lineAlpha;
@@ -1189,8 +1376,8 @@ export class Series extends Gfx.Object3D
                     const barA = this.bars[barIdx];
                     const barB = this.bars[barIdx + 1];
 
-                    const yA = (barA.values[valueIdx] ?? 0) * this.chart.barScaleY;
-                    const yB = (barB.values[valueIdx] ?? 0) * this.chart.barScaleY;
+                    const yA = this.valueToWorldY(barA.values[valueIdx] ?? 0);
+                    const yB = this.valueToWorldY(barB.values[valueIdx] ?? 0);
 
                     lineOpacities[segmentIdx * 2 + 0] = this.computeEdgeFadeAlpha(barA.posX, yA, yA);
                     lineOpacities[segmentIdx * 2 + 1] = this.computeEdgeFadeAlpha(barB.posX, yB, yB);
@@ -1214,7 +1401,9 @@ export class Series extends Gfx.Object3D
         for (let i = 0; i < count; i++) {
             const bar = this.bars[i];
 
-            const boxHeight = bar.values.length == 4 ? Math.abs(bar.values[3] - bar.values[0]) : bar.values[0];
+            const boxHeight = bar.values.length == 4
+                ? Math.abs(bar.values[3] - bar.values[0]) * this.unitsPerValue
+                : 0.001;
             bar.updateMatrix(this.chart.barWidth, boxHeight);
 
             this.cubeMesh.setMatrixAt(i, bar.getMatrix());
@@ -1235,8 +1424,6 @@ export class Series extends Gfx.Object3D
      */
     public override updateMatrixWorld(force?: boolean): void {
         super.updateMatrixWorld(force);
-
-        this.position.z = 0.001;
 
         if (Renderer.frameId === this.lastUpdatedFrameId)
             return;
