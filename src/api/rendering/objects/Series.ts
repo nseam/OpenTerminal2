@@ -120,6 +120,12 @@ export class Series extends Gfx.Object3D
 
     private static readonly VALUE_POINT_PICK_RADIUS_MULTIPLIER = 4;
 
+    /**
+     * Radius factor (relative to the bar pitch) of the marker drawn on a hovered value point.
+     * Kept a little larger than the plain point radius so the hovered points stand out.
+     */
+    private static readonly HOVER_POINT_RADIUS_FACTOR = 0.22;
+
     /** Allocated GPU buffer capacity in number of lines — only grows, never shrinks on zoom. */
     private numAllocatedLines: number = 0;
 
@@ -282,21 +288,20 @@ export class Series extends Gfx.Object3D
     /** Scratch color reused by getValueChannelColor(). */
     private _tempChannelColor: Gfx.Color = new Gfx.Color();
 
-    /** Index of the bar currently hovered for Line-type series (no InstancedMesh picking available), or -1 if none. */
+    /** Index of the bar column currently hovered for Line-type series, or -1 if none. */
     private hoveredBarIndex: number = -1;
 
-    /** Index of the value channel currently hovered for Line-type series, or -1 if none. */
+    /**
+     * Index of the value channel hovered exactly, or -1 when the whole column is hovered.
+     *
+     * A negative index means "every channel of `hoveredBarIndex`", which is what makes a single
+     * hover mark all indicators from top to bottom instead of only the one nearest the cursor.
+     */
     private hoveredValueIndex: number = -1;
 
     private selectedValueBarIndex: number = -1;
 
     private selectedValueIndex: number = -1;
-
-    /** Small filled circle marking the hovered point, shown only for Line-type series. */
-    private hoverCircleMesh: Gfx.Mesh | null = null;
-
-    /** Material of hoverCircleMesh (tracked so its color can be updated per hovered value channel). */
-    private hoverCircleMaterial: Gfx.MeshBasicMaterial | null = null;
 
     private selectedPointMesh: Gfx.Mesh | null = null;
 
@@ -408,9 +413,6 @@ export class Series extends Gfx.Object3D
         if (this.valuePointPickMesh)
             this.valuePointPickMesh.count = 0;
 
-        if (this.hoverCircleMesh)
-            this.hoverCircleMesh.visible = false;
-
         if (this.selectedPointMesh)
             this.selectedPointMesh.visible = false;
     }
@@ -454,7 +456,6 @@ export class Series extends Gfx.Object3D
                 this.cubeMesh.count = 0;
         }
 
-        this.updateHoverCircle();
         this.updateSelectedPoint();
     }
 
@@ -649,11 +650,22 @@ export class Series extends Gfx.Object3D
                 return null;
 
             const valueIndex = Math.floor(instanceId / numBars);
-            return { kind: 'point', barIndex: instanceId % numBars, valueIndex };
+            const barIndex = instanceId % numBars;
+
+            // Gap slots have a degenerate pick matrix that raycasting can still report; ignore them.
+            if (this.bars[barIndex]?.values[valueIndex] === undefined)
+                return null;
+
+            return { kind: 'point', barIndex, valueIndex };
         }
 
-        if (mesh === this.cubePickMesh && instanceId < this.chart.numBarsVisible)
+        if (mesh === this.cubePickMesh && instanceId < this.chart.numBarsVisible) {
+            // Line series keep an (invisible) cube per bar; only candlesticks with data are hoverable.
+            if (this.seriesType !== SeriesType.Candlestick || this.bars[instanceId]?.values.length === 0)
+                return null;
+
             return { kind: 'bar', barIndex: instanceId };
+        }
 
         return null;
     }
@@ -737,8 +749,9 @@ export class Series extends Gfx.Object3D
      * Layouts the bars in the series so that they are next to each other, with a small spacing between them.
      */
     public layoutBars(): void {
-        const bbox = this.chart.getBBox();
-        const chartWidth = bbox.max.x - bbox.min.x;
+        // Unzoomed reference width: the bbox width follows numBarsVisible (zoom), which would make
+        // bars shrink whenever the bbox is recomputed while zoomed out (e.g. on setData()).
+        const chartWidth = this.chart.numInitialBars * (this.chart.barWidth + this.chart.barSpacing);
 
         // World units per raw indicator value. Price series are mapped onto the chart's price
         // window, non-price series onto a fixed 0..100 range.
@@ -816,7 +829,8 @@ export class Series extends Gfx.Object3D
             const barMinY = bar.posY - halfHeight;
             const barMaxY = bar.posY + halfHeight;
 
-            const alpha = this.computeEdgeFadeAlpha(bar.posX, barMinY, barMaxY);
+            // Bars without values (past the data, or before an indicator starts) are not drawn.
+            const alpha = bar.values.length === 0 ? 0 : this.computeEdgeFadeAlpha(bar.posX, barMinY, barMaxY);
 
             if (attributeOpacity)
                 attributeOpacity.array[barIdx] = alpha;
@@ -832,9 +846,13 @@ export class Series extends Gfx.Object3D
 
         this.cubeMesh.count = this.chart.numBarsVisible;
 
+        // A sphere cached while count was 0 (line series) is empty and would frustum-cull the bodies.
+        this.cubeMesh.boundingSphere = null;
+
         if (this.cubePickMesh) {
             this.cubePickMesh.instanceMatrix.needsUpdate = true;
             this.cubePickMesh.count = this.chart.numBarsVisible;
+            this.cubePickMesh.boundingSphere = null;
         }
     }
 
@@ -890,7 +908,7 @@ export class Series extends Gfx.Object3D
 
             const lineMinY = Math.min(hNorm, lNorm);
             const lineMaxY = Math.max(hNorm, lNorm);
-            const lineAlpha = this.computeEdgeFadeAlpha(bar.posX, lineMinY, lineMaxY);
+            const lineAlpha = bar.values.length === 0 ? 0 : this.computeEdgeFadeAlpha(bar.posX, lineMinY, lineMaxY);
 
             if (opacities) {
                 // Opacity attribute has itemSize 1 (one value per vertex), unlike position/color's itemSize 3.
@@ -928,7 +946,7 @@ export class Series extends Gfx.Object3D
 
         let segmentIdx = 0;
         let pointIdx = 0;
-        const radius = Math.min(this.chart.barWidth, this.chart.verticalLineDistance) * 0.12;
+        const radius = Math.min(this.chart.barWidth, this.chart.verticalLineDistance) * Series.HOVER_POINT_RADIUS_FACTOR;
         const pickRadius = radius * Series.VALUE_POINT_PICK_RADIUS_MULTIPLIER;
 
         if (numValues > 0) {
@@ -937,11 +955,24 @@ export class Series extends Gfx.Object3D
 
                 for (let barIdx = 0; barIdx < numBars; barIdx++) {
                     const bar = this.bars[barIdx];
-                    const y = this.valueToWorldY(bar.values[valueIdx] ?? 0);
-                    const isActive = (barIdx === this.hoveredBarIndex && valueIdx === this.hoveredValueIndex) ||
-                        (barIdx === this.selectedValueBarIndex && valueIdx === this.selectedValueIndex);
 
-                    this._tempMatrix.makeScale(isActive ? radius : 0, isActive ? radius : 0, 1);
+                    // Bars this series doesn't cover get a zero-scale point, so instance index stays
+                    // valueIdx * numBars + barIdx (see resolvePickTarget).
+                    if (bar.values.length === 0 || bar.values[valueIdx] === undefined) {
+                        this._tempMatrix.makeScale(0, 0, 1);
+                        pointMesh?.setMatrixAt(pointIdx, this._tempMatrix);
+                        pointMesh?.setColorAt(pointIdx, color);
+                        pointPickMesh?.setMatrixAt(pointIdx, this._tempMatrix);
+                        pointIdx++;
+                        continue;
+                    }
+
+                    const y = this.valueToWorldY(bar.values[valueIdx] ?? 0);
+                    const isActive = this.isPointActive(barIdx, valueIdx);
+                    // Points have no opacity attribute, so they shrink away with the same edge fade as the lines.
+                    const pointRadius = isActive ? radius * this.computeEdgeFadeAlpha(bar.posX, y, y) : 0;
+
+                    this._tempMatrix.makeScale(pointRadius, pointRadius, 1);
                     this._tempMatrix.setPosition(bar.posX, y, 0);
                     pointMesh?.setMatrixAt(pointIdx, this._tempMatrix);
                     pointMesh?.setColorAt(pointIdx, color);
@@ -954,6 +985,12 @@ export class Series extends Gfx.Object3D
                 for (let barIdx = 0; barIdx < numBars - 1; barIdx++) {
                     const barA = this.bars[barIdx];
                     const barB = this.bars[barIdx + 1];
+
+                    // Don't bridge gaps: an indicator with no value at a bar (e.g. the leading
+                    // bars of an MA) must break the polyline, not be drawn at the axis.
+                    if (barA.values.length === 0 || barA.values[valueIdx] === undefined ||
+                        barB.values.length === 0 || barB.values[valueIdx] === undefined)
+                        continue;
 
                     const yA = this.valueToWorldY(barA.values[valueIdx] ?? 0);
                     const yB = this.valueToWorldY(barB.values[valueIdx] ?? 0);
@@ -1044,18 +1081,25 @@ export class Series extends Gfx.Object3D
     }
 
     /**
-     * Sets which bar/value-channel point is currently hovered (Line-type series only) and
-     * refreshes the hover marker circle. Pass -1/-1 to clear the hover state.
+     * Sets which bar column is currently hovered (Line-type series only) and refreshes the markers
+     * of every value channel in that column.
+     *
+     * A negative `valueIndex` marks the whole column, which is what makes a single hover show a
+     * marker on every indicator from top to bottom instead of only on the line nearest the cursor.
+     * Pass -1/-1 to clear the hover state.
      */
     public setHoveredValue(barIndex: number, valueIndex: number): void {
         const previousBarIndex = this.hoveredBarIndex;
-        const previousValueIndex = this.hoveredValueIndex;
+
+        if (previousBarIndex === barIndex && this.hoveredValueIndex === valueIndex)
+            return;
+
         this.hoveredBarIndex = barIndex;
         this.hoveredValueIndex = valueIndex;
 
-        this.updateValuePointMarker(previousBarIndex, previousValueIndex);
-        this.updateValuePointMarker(barIndex, valueIndex);
-        this.updateHoverCircle();
+        // Both columns are refreshed, so moving the cursor never leaves a stale marker behind.
+        this.refreshHoverColumnMarkers(previousBarIndex);
+        this.refreshHoverColumnMarkers(barIndex);
     }
 
     public setSelectedValue(barIndex: number, valueIndex: number): void {
@@ -1069,6 +1113,33 @@ export class Series extends Gfx.Object3D
         this.updateSelectedPoint();
     }
 
+    /**
+     * Whether the marker of the given bar/value-channel point should be drawn.
+     *
+     * A hovered column activates every channel of that bar; an explicitly hovered channel (the
+     * point directly under the cursor) activates only itself.
+     */
+    private isPointActive(barIndex: number, valueIndex: number): boolean {
+        if (barIndex === this.selectedValueBarIndex && valueIndex === this.selectedValueIndex)
+            return true;
+
+        if (barIndex !== this.hoveredBarIndex)
+            return false;
+
+        return this.hoveredValueIndex < 0 || this.hoveredValueIndex === valueIndex;
+    }
+
+    /** Re-applies the marker matrices of every value channel of the given bar column. */
+    private refreshHoverColumnMarkers(barIndex: number): void {
+        if (barIndex < 0)
+            return;
+
+        const numValues = this.getNumValueChannels();
+
+        for (let valueIndex = 0; valueIndex < numValues; valueIndex++)
+            this.updateValuePointMarker(barIndex, valueIndex);
+    }
+
     private updateValuePointMarker(barIndex: number, valueIndex: number): void {
         const mesh = this.valuePointMesh;
         const numBars = this.chart.numBarsVisible;
@@ -1080,13 +1151,14 @@ export class Series extends Gfx.Object3D
             return;
 
         const bar = this.bars[barIndex];
-        if (!bar)
+        if (!bar || bar.values[valueIndex] === undefined)
             return;
 
-        const isActive = (barIndex === this.hoveredBarIndex && valueIndex === this.hoveredValueIndex) ||
-            (barIndex === this.selectedValueBarIndex && valueIndex === this.selectedValueIndex);
-        const radius = isActive ? Math.min(this.chart.barWidth, this.chart.verticalLineDistance) * 0.12 : 0;
+        const isActive = this.isPointActive(barIndex, valueIndex);
         const y = this.valueToWorldY(bar.values[valueIndex] ?? 0);
+        const radius = isActive
+            ? Math.min(this.chart.barWidth, this.chart.verticalLineDistance) * Series.HOVER_POINT_RADIUS_FACTOR * this.computeEdgeFadeAlpha(bar.posX, y, y)
+            : 0;
 
         this._tempMatrix.makeScale(radius, radius, 1);
         this._tempMatrix.setPosition(bar.posX, y, 0);
@@ -1096,49 +1168,6 @@ export class Series extends Gfx.Object3D
 
     public isValueSelected(barIndex: number, valueIndex: number): boolean {
         return this.selectedValueBarIndex === barIndex && this.selectedValueIndex === valueIndex;
-    }
-
-    /** Lazily creates the filled circle mesh used to mark the hovered point on Line-type series. */
-    private ensureHoverCircle(): void {
-        if (this.hoverCircleMesh)
-            return;
-
-        const geometry = new Gfx.CircleGeometry(0.3, 16);
-        this.hoverCircleMaterial = new Gfx.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthTest: false });
-        this.hoverCircleMesh = new Gfx.Mesh(geometry, this.hoverCircleMaterial);
-        this.hoverCircleMesh.visible = false;
-        this.hoverCircleMesh.renderOrder = 999;
-
-        this.add(this.hoverCircleMesh);
-    }
-
-    /**
-     * Positions and shows/hides the hover marker circle based on the currently hovered
-     * bar/value-channel point. Only applicable to Line-type series; hidden for Candlestick.
-     */
-    private updateHoverCircle(): void {
-        if (this.seriesType === SeriesType.Candlestick) {
-            if (this.hoverCircleMesh)
-                this.hoverCircleMesh.visible = false;
-            return;
-        }
-
-        this.ensureHoverCircle();
-
-        const bar = this.hoveredBarIndex >= 0 ? this.bars[this.hoveredBarIndex] : undefined;
-
-        if (!bar || this.hoveredValueIndex < 0) {
-            this.hoverCircleMesh!.visible = false;
-            return;
-        }
-
-        const y = this.valueToWorldY(bar.values[this.hoveredValueIndex] ?? 0);
-        const radius = Math.min(this.chart.barWidth, this.chart.verticalLineDistance) * 0.2;
-
-        this.hoverCircleMesh!.position.set(bar.posX, y, 0);
-        this.hoverCircleMesh!.scale.set(radius, radius, 1);
-        this.hoverCircleMaterial!.color.copy(this.getValueChannelColor(this.hoveredValueIndex));
-        this.hoverCircleMesh!.visible = true;
     }
 
     private updateSelectedPoint(): void {
@@ -1205,21 +1234,102 @@ export class Series extends Gfx.Object3D
         if (this.data === null)
             return;
 
+        // One window for the whole chart: a series that starts later (e.g. an MA, which needs
+        // `period` bars of history) must be aligned by timestamp rather than by array offset,
+        // otherwise it is drawn shifted left and covers the wrong bars.
+        const [windowStart, windowEnd] = this.chart.getDataWindow();
+
         for (let barIdx = 0; barIdx < this.chart.numBarsVisible; barIdx++) {
             const bar = this.bars[barIdx];
-            
-            if (barIdx + this.chart.startIndex < this.data.values.length) {
-                const row = this.data.values[barIdx + this.chart.startIndex];
-                // `timestamp` is in Unix seconds; bars store milliseconds.
-                const timeMs = Number(row.timestamp) * 1000;
-                // `values` is typed as a CppArray, but the wasm layer hands us a plain JS array.
-                const values = (row as unknown as { values?: unknown }).values;
-                bar.setValues(timeMs, Array.isArray(values) ? values as number[] : []);
-            } else {
-                // If there's no data for this bar, set it to zero values.
+            const datasetIndex = windowStart + barIdx;
+            const slotMs = datasetIndex >= windowStart && datasetIndex < windowEnd
+                ? this.chart.timeAtIndex(datasetIndex)
+                : 0;
+
+            // The row is looked up by timestamp, so a series that starts later (e.g. an MA, which
+            // needs `period` bars of history) lands on the bar it actually belongs to, and the
+            // bars it does not cover stay empty instead of borrowing a neighbouring row's values.
+            const row = slotMs > 0 ? this.rowAtTime(slotMs) : undefined;
+
+            if (!row) {
+                // No data for this slot — leave the bar empty so nothing is drawn for it.
                 bar.setValues(0, []);
+                continue;
             }
+
+            // `timestamp` is in Unix seconds; bars store milliseconds.
+            // `values` is typed as a CppArray, but the wasm layer hands us a plain JS array.
+            const values = (row as unknown as { values?: unknown }).values;
+            bar.setValues(slotMs, Array.isArray(values) ? values as number[] : []);
         }
+    }
+
+    /**
+     * The row of this series that applies at the given timestamp (ms), or undefined when the
+     * series has no value at that time.
+     *
+     * Rows are sorted by timestamp, so a binary search finds an exact match. When there is none,
+     * the previous row is borrowed only while the requested time still falls inside that row's
+     * interval, i.e. less than one row spacing after it. That is what makes an indicator running
+     * on a coarser time-frame than the chart (e.g. an H1 MA over M1 bars) cover every bar of its
+     * interval, while a series that simply ends earlier (e.g. an MA with a shift) stays empty
+     * instead of repeating its last value.
+     */
+    private rowAtTime(timeMs: number): TesterValuesColumns['values'][number] | undefined {
+        const values = this.data?.values;
+
+        if (!values || values.length === 0)
+            return undefined;
+
+        let low = 0;
+        let high = values.length - 1;
+
+        while (low <= high) {
+            const mid = (low + high) >> 1;
+            const midTimeMs = Number(values[mid].timestamp) * 1000;
+
+            if (midTimeMs === timeMs)
+                return values[mid];
+
+            if (midTimeMs < timeMs)
+                low = mid + 1;
+            else
+                high = mid - 1;
+        }
+
+        // `low` is the insertion point, so `low - 1` is the last row before the requested time.
+        const previous = low - 1;
+
+        // Nothing before it, so the series does not cover this bar yet.
+        if (previous < 0)
+            return undefined;
+
+        // The interval a row covers is the distance to the next one. Without a second row there is
+        // no way to tell how far a value reaches, so only exact matches are used.
+        const spacing = Series.rowSpacing(values);
+
+        if (spacing <= 0)
+            return undefined;
+
+        const previousTimeMs = Number(values[previous].timestamp) * 1000;
+
+        return timeMs - previousTimeMs < spacing ? values[previous] : undefined;
+    }
+
+    /**
+     * Typical distance (ms) between two consecutive rows of the given series.
+     *
+     * Taken from the last two rows, because that is where the series is guaranteed to be complete
+     * (warm-up rows may be missing).
+     */
+    private static rowSpacing(values: TesterValuesColumns['values']): number {
+        if (values.length < 2)
+            return 0;
+
+        const last = Number(values[values.length - 1].timestamp) * 1000;
+        const beforeLast = Number(values[values.length - 2].timestamp) * 1000;
+
+        return last - beforeLast;
     }
 
     /**
@@ -1325,7 +1435,7 @@ export class Series extends Gfx.Object3D
                     attributeOpacity.array[barIdx] = this.computeEdgeFadeAlpha(bar.posX, bar.posY - halfHeight, bar.posY + halfHeight);
                 }
                 else {
-                    attributeOpacity.array[barIdx] = this.computeEdgeFadeAlpha(bar.posX, bar.posY, bar.posY);
+                    attributeOpacity.array[barIdx] = bar.values.length === 0 ? 0 : this.computeEdgeFadeAlpha(bar.posX, bar.posY, bar.posY);
                 }
             }
 
@@ -1342,7 +1452,7 @@ export class Series extends Gfx.Object3D
                     lineOpacities[barIdx * 2 + 1] = lineAlpha;
                 }
                 else {
-                    const lineAlpha = this.computeEdgeFadeAlpha(bar.posX, bar.posY, bar.posY);
+                    const lineAlpha = bar.values.length === 0 ? 0 : this.computeEdgeFadeAlpha(bar.posX, bar.posY, bar.posY);
 
                     // Opacity attribute has itemSize 1 (one value per vertex), unlike position/color's itemSize 3.
                     lineOpacities[barIdx * 2 + 0] = lineAlpha;
@@ -1376,6 +1486,11 @@ export class Series extends Gfx.Object3D
                     const barA = this.bars[barIdx];
                     const barB = this.bars[barIdx + 1];
 
+                    // Must skip the same gap segments as layout, or opacities shift out of sync with segments.
+                    if (barA.values.length === 0 || barA.values[valueIdx] === undefined ||
+                        barB.values.length === 0 || barB.values[valueIdx] === undefined)
+                        continue;
+
                     const yA = this.valueToWorldY(barA.values[valueIdx] ?? 0);
                     const yB = this.valueToWorldY(barB.values[valueIdx] ?? 0);
 
@@ -1388,6 +1503,9 @@ export class Series extends Gfx.Object3D
         }
 
         (this.gfxLineGeometry!.attributes.opacity as Gfx.BufferAttribute).needsUpdate = true;
+
+        // Hover markers follow scrolling, so their edge fade has to be refreshed too.
+        this.refreshHoverColumnMarkers(this.hoveredBarIndex);
     }
 
     /**
@@ -1412,10 +1530,12 @@ export class Series extends Gfx.Object3D
 
         this.cubeMesh.instanceMatrix.needsUpdate = true;
         this.cubeMesh.count = count;
+        this.cubeMesh.boundingSphere = null;
 
         if (this.cubePickMesh) {
             this.cubePickMesh.instanceMatrix.needsUpdate = true;
             this.cubePickMesh.count = count;
+            this.cubePickMesh.boundingSphere = null;
         }
     }
 

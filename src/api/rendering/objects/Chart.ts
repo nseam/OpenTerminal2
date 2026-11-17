@@ -2,11 +2,11 @@ import * as Gfx from 'three';
 import { Series } from './Series';
 import { ChartGrid } from './ChartGrid';
 import { Renderer } from './../Renderer';
+import { AppStaticSettings } from '../../data/AppStaticSettings';
 import { type TesterValuesColumns } from 'fx31337-wasm/lib/types/TesterValuesColumns';
 import { type TesterIndicatorInfo } from 'fx31337-wasm/lib/types/TesterIndicatorInfo';
 import { type IndicatorDataEntry } from 'fx31337-wasm/lib/types/IndicatorDataEntry';
 import { ENUM_IDATA_VALUE_RANGE } from 'fx31337-wasm/lib/types/enums/ENUM_IDATA_VALUE_RANGE';
-import { Bar } from './Bar';
 
 /**
  * A horizontal line marking the last value of a single price indicator.
@@ -16,6 +16,8 @@ export interface ChartLastPriceLine {
     series: Series;
     /** Name of the indicator. */
     name: string;
+    /** Title of the value the line marks (e.g. "Close" for OHLC), or an empty string. */
+    valueTitle: string;
     /** The last value (the close price for OHLC indicators). */
     value: number;
     /** World-space Y coordinate of the line inside the chart. */
@@ -45,6 +47,13 @@ export class Chart extends Gfx.Object3D
      * The grid of the chart. This will be used to display the grid lines on the chart.
      */
     public grid: ChartGrid = new ChartGrid(this);
+
+    /**
+     * Releases the DOM elements the chart created. Call after removing the chart from the scene.
+     */
+    public dispose(): void {
+        this.grid.dispose();
+    }
 
     /**
      * Number of bars that is currently visible in the chart.
@@ -239,11 +248,35 @@ export class Chart extends Gfx.Object3D
     }
 
     /**
-     * Converts a non-price indicator value (0..100) into a world-space Y coordinate inside the
-     * chart. Value 0 sits at the bottom of the chart, value 100 at the top.
+     * Lowest value of the default non-price indicator window. Indicators whose values fit this
+     * window (e.g. RSI, Stochastic) are drawn on the conventional 0..100 scale.
      */
-    public valueToWorldY(value: number): number {
-        return value / 100 * this.chartHeight;
+    public static readonly DEFAULT_VALUE_MIN: number = 0;
+
+    /**
+     * Highest value of the default non-price indicator window.
+     */
+    public static readonly DEFAULT_VALUE_MAX: number = 100;
+
+    /**
+     * Converts a non-price indicator value into a world-space Y coordinate inside the chart.
+     *
+     * The value is mapped from the given window onto the chart's full height, so `valueMin` sits
+     * at the bottom of the chart and `valueMax` at the top. The window defaults to 0..100, but
+     * indicators that use another scale (e.g. WPR, which is -100..0) pass their own window —
+     * otherwise their values would be mapped outside of the chart and never be drawn.
+     */
+    public valueToWorldY(
+        value: number,
+        valueMin: number = Chart.DEFAULT_VALUE_MIN,
+        valueMax: number = Chart.DEFAULT_VALUE_MAX
+    ): number {
+        const range = valueMax - valueMin;
+
+        if (!Number.isFinite(range) || range <= 0)
+            return 0;
+
+        return (value - valueMin) / range * this.chartHeight;
     }
 
     /**
@@ -272,6 +305,25 @@ export class Chart extends Gfx.Object3D
      */
     public static stripIndicatorIndex(name: string): string {
         return name.replace(/^\(\d+\)\s*/, '');
+    }
+
+    /**
+     * Returns the titles of the values of the given indicator, in the order the values are emitted.
+     *
+     * The titles are configured in `AppStaticSettings` and follow the buffer names MetaTrader uses
+     * for the same indicator (e.g. Alligator's Jaw, Teeth and Lips). An empty array is returned for
+     * indicators that have no configured titles, so callers can fall back to unlabelled values.
+     *
+     * @param indicatorName The `indicator_info.name` of the series, e.g. `(42) Alligator`.
+     */
+    public static getValueTitles(indicatorName: string | undefined): string[] {
+        if (!indicatorName)
+            return [];
+
+        const typeId = Chart.stripIndicatorIndex(indicatorName);
+        const indicator = AppStaticSettings.indicators.find(candidate => candidate.typeId === typeId);
+
+        return indicator?.valueTitles ?? [];
     }
 
     /**
@@ -348,7 +400,8 @@ export class Chart extends Gfx.Object3D
                 continue;
 
             // For OHLC indicators the last value is the close price.
-            const value = values.length === 4 ? values[3] : values[0];
+            const valueIndex = values.length === 4 ? 3 : 0;
+            const value = values[valueIndex];
 
             if (!Number.isFinite(value))
                 continue;
@@ -358,8 +411,10 @@ export class Chart extends Gfx.Object3D
             result.push({
                 series,
                 name: info?.name ?? '',
+                valueTitle: Chart.getValueTitles(info?.name)[valueIndex] ?? '',
                 value,
-                worldY: this.priceToWorldY(value),
+                // Price series are shifted by scrollY, so their last-price line must follow.
+                worldY: this.priceToWorldY(value) + this.scrollY,
                 // Use the color the series is actually drawn with, so the line matches the chart.
                 color: series.color,
             });
@@ -438,7 +493,219 @@ export class Chart extends Gfx.Object3D
     };
 
     /**
+     * Index of the bar slot (within the visible window) the mouse is currently hovering, or -1.
+     *
+     * A slot is shared by every series of the chart, so hovering a single bar reports the values of
+     * *all* indicators at that bar rather than only the one under the cursor.
+     */
+    public hoveredBarIndex: number = -1;
+
+    /**
+     * Sets the hovered bar slot and highlights that bar in every series of the chart.
+     *
+     * Pass -1 to clear the hover state. The previous slot is cleared in the same pass, so moving
+     * the cursor from one bar to the next never leaves a stale highlight behind.
+     */
+    public setHoveredBarIndex(index: number): void {
+        const clamped = index >= 0 && index < this.numBarsVisible ? index : -1;
+
+        if (this.hoveredBarIndex === clamped)
+            return;
+
+        const previous = this.hoveredBarIndex;
+        this.hoveredBarIndex = clamped;
+
+        this.applyHoverHighlight(previous, clamped);
+    }
+
+    /**
+     * Applies the hover flag to the given bar slots of every series and refreshes their colors.
+     *
+     * Both the previously hovered and the newly hovered slot are handled in one pass, so a series
+     * never keeps two highlighted bars.
+     */
+    private applyHoverHighlight(previous: number, current: number): void {
+        for (const series of this.series) {
+            for (const barIndex of [previous, current]) {
+                if (barIndex < 0 || barIndex >= series.bars.length)
+                    continue;
+
+                const bar = series.bars[barIndex];
+
+                if (!bar)
+                    continue;
+
+                bar.hovered = barIndex === current;
+                series.updateBarColor(barIndex);
+            }
+        }
+
+        this.updateHoverColumn();
+    }
+
+    /**
+     * Drops every hover highlight, including the flags left on `Bar` objects that are reused
+     * across datasets. Called when the data is replaced, where the old slot indices are meaningless.
+     */
+    private clearHoverHighlight(): void {
+        this.hoveredBarIndex = -1;
+
+        for (const series of this.series) {
+            for (const bar of series.bars)
+                bar.hovered = false;
+        }
+
+        this.updateHoverColumn();
+    }
+
+    /**
+     * Vertical guide marking the hovered bar column across the whole chart.
+     *
+     * Candlestick series highlight the hovered bar through its own color, but line series have no
+     * per-bar geometry, so a single chart-wide guide is what makes the hovered column visible for
+     * every indicator at once.
+     */
+    private hoverColumnMesh: Gfx.Line | null = null;
+
+    /** Material of `hoverColumnMesh`. */
+    private hoverColumnMaterial: Gfx.LineBasicMaterial | null = null;
+
+    /** Lazily creates the vertical guide used to mark the hovered bar column. */
+    private ensureHoverColumn(): void {
+        if (this.hoverColumnMesh)
+            return;
+
+        const geometry = new Gfx.BufferGeometry().setFromPoints([
+            new Gfx.Vector3(0, 0, 0),
+            new Gfx.Vector3(0, 1, 0),
+        ]);
+
+        this.hoverColumnMaterial = new Gfx.LineBasicMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.35,
+            depthTest: false,
+        });
+
+        this.hoverColumnMesh = new Gfx.Line(geometry, this.hoverColumnMaterial);
+        this.hoverColumnMesh.visible = false;
+        this.hoverColumnMesh.renderOrder = 997;
+
+        this.add(this.hoverColumnMesh);
+    }
+
+    /**
+     * Positions and shows/hides the hovered-column guide.
+     *
+     * The guide spans the chart's full height and is placed at the hovered bar's X position, which
+     * is the same for every series because they all share the chart's bar layout.
+     */
+    private updateHoverColumn(): void {
+        if (this.hoveredBarIndex < 0) {
+            if (this.hoverColumnMesh)
+                this.hoverColumnMesh.visible = false;
+            return;
+        }
+
+        // Every series shares the chart's bar layout, so any series that covers the hovered bar
+        // can supply its X position. Series that start later (e.g. an MA) simply have no values
+        // there, so the first one that does is used.
+        let posX: number | null = null;
+        let offsetX = 0;
+
+        for (const series of this.series) {
+            const bar = series.bars[this.hoveredBarIndex];
+
+            if (!bar || bar.values.length === 0)
+                continue;
+
+            posX = bar.posX;
+            offsetX = series.position.x;
+            break;
+        }
+
+        if (posX === null) {
+            if (this.hoverColumnMesh)
+                this.hoverColumnMesh.visible = false;
+            return;
+        }
+
+        this.ensureHoverColumn();
+
+        // `bar.posX` is series-local, so the series' own offset (which carries the horizontal
+        // scroll) has to be added to place the guide in chart space.
+        this.hoverColumnMesh!.position.set(offsetX + posX, 0, 0);
+        this.hoverColumnMesh!.scale.set(1, this.chartHeight, 1);
+        this.hoverColumnMesh!.visible = true;
+    }
+
+    /**
+     * Formats the values of a single bar for the hover tooltip.
+     *
+     * Price series use the chart's price precision and non-price indicators are shown with two
+     * decimals. Every value is prefixed with its bolded title (e.g. "**Jaw** 1.2345"), taken from
+     * the indicator's `valueTitles` in `AppStaticSettings`, so the values can be told apart.
+     */
+    private formatBarValues(series: Series, values: number[]): string {
+        const digits = series.isPriceSeries ? this.priceDigits : 2;
+        const format = (value: number): string => Number.isFinite(value) ? value.toFixed(digits) : '—';
+        const titles = Chart.getValueTitles(series.data?.indicator_info?.name);
+
+        // Fallback for a four-value price series without configured titles (e.g. Heiken Ashi).
+        const fallbackTitles = values.length === 4 && series.isPriceSeries
+            ? ['O', 'H', 'L', 'C']
+            : [];
+
+        return values.map((value, index) => {
+            const title = titles[index] ?? fallbackTitles[index];
+
+            return title
+                ? `<b>${Chart.escapeHtml(title)}</b> ${format(value)}`
+                : format(value);
+        }).join(' ');
+    }
+
+    /**
+     * Escapes text so indicator names can be embedded in the tooltip's markup safely.
+     */
+    private static escapeHtml(text: string): string {
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    /**
+     * Formats a bar timestamp (ms) as "D Mon YYYY HH:MM" for the hover tooltip.
+     *
+     * Unlike the grid labels this uses the timestamp as-is, so the tooltip reports the exact time
+     * of the hovered bar.
+     */
+    private static formatBarTime(timeMs: number): string {
+        const date = new Date(timeMs);
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const hours = date.getHours().toString().padStart(2, '0');
+        const minutes = date.getMinutes().toString().padStart(2, '0');
+
+        return `${date.getDate()} ${months[date.getMonth()]} ${date.getFullYear()} ${hours}:${minutes}`;
+    }
+
+    /** Last markup written to the hover tooltip, so the DOM is only touched when it changes. */
+    private lastBarHoverHtml: string = '';
+
+    /**
+     * Horizontal rule separating the tooltip's timestamp header from the indicator values.
+     *
+     * Styled by `.chart-tooltip-separator` in `VCanvas3D.vue`, next to the tooltip's own styles.
+     */
+    private static readonly TOOLTIP_SEPARATOR: string = '<div class="chart-tooltip-separator"></div>';
+
+    /**
      * Updates the labels on the chart, e.g. hover tooltips.
+     *
+     * The tooltip lists the values of every visible indicator at the hovered bar, one indicator per
+     * line, so a single hover reports the whole chart's state instead of just the series under the
+     * cursor.
      */
     public updateLabels(): void {
         if (!this._domBarHover.parentElement) {
@@ -447,32 +714,52 @@ export class Chart extends Gfx.Object3D
             document.addEventListener('mousemove', this.positionBarHover);
         }
 
-        // Displaying the hover tooltip only if the mouse is over a bar.
-        let isHoveringOverBar = false;
+        const lines: string[] = [];
+        let timeMs = 0;
 
-        let hoveredBar: Bar | null = null;
-        let hoveredSeries: Series | null = null;
-        
-        for (const series of this.series) {
-            const visibleBars = Math.min(this.numBarsVisible, series.bars.length);
-            for (let barIndex = 0; barIndex < visibleBars; barIndex++) {
-                const bar = series.bars[barIndex];
-                if (bar.hovered) {
-                    isHoveringOverBar = true;
-                    hoveredSeries = series;
-                    hoveredBar = bar;
-                    break;
-                }
+        if (this.hoveredBarIndex >= 0) {
+            for (const series of this.series) {
+                // Hidden indicators are not drawn, so they must not be reported either.
+                if (!series.visible)
+                    continue;
+
+                const bar = series.bars[this.hoveredBarIndex];
+
+                if (!bar || bar.values.length === 0)
+                    continue;
+
+                if (timeMs === 0 && bar.time_ms > 0)
+                    timeMs = bar.time_ms;
+
+                const name = Chart.stripIndicatorIndex(series.data?.indicator_info?.name ?? '') || 'Series';
+                const color = Series.formatColor(series.color);
+
+                lines.push(
+                    `<span style="color:${color}">${Chart.escapeHtml(name)}</span>: ${this.formatBarValues(series, bar.values)}`
+                );
             }
-
-            if (isHoveringOverBar)
-                break;
         }
 
-        this._domBarHover.style.display = isHoveringOverBar ? 'block' : 'none';
+        const isHovering = lines.length > 0;
 
-        if (hoveredBar && hoveredSeries) {
-            this._domBarHover.innerHTML = `Series: ${hoveredSeries.data?.indicator_info.name}<br>Values: ${hoveredBar.values.join(', ')}`;
+        this._domBarHover.style.display = isHovering ? 'block' : 'none';
+
+        if (!isHovering) {
+            this.lastBarHoverHtml = '';
+            return;
+        }
+
+        // The timestamp header is separated from the values by a horizontal rule, so the header
+        // does not read as just another indicator line.
+        const header = timeMs > 0
+            ? `${Chart.formatBarTime(timeMs)}${Chart.TOOLTIP_SEPARATOR}`
+            : '';
+
+        const html = header + lines.join('<br>');
+
+        if (html !== this.lastBarHoverHtml) {
+            this._domBarHover.innerHTML = html;
+            this.lastBarHoverHtml = html;
         }
     }
 
@@ -529,11 +816,30 @@ export class Chart extends Gfx.Object3D
      * Sets the data for the chart and immediately feeds all series from the current barsStartIndex.
      *
      * @param data The data to display.
+     * @param timeframe Time-frame the chart's bars are built on, as an `ENUM_TIMEFRAMES` value
+     * (i.e. `lib.timeframes[id]`). Indicators may run on other time-frames, so this is what
+     * decides which series provides the chart's bar grid. When omitted, the longest series is
+     * used, which is what a chart whose indicators all share one time-frame wants.
      */
-    public setData(data: TesterValuesColumns[] | null): void {
+    public setData(data: TesterValuesColumns[] | null, timeframe?: number): void {
         this.data = data;
         this.cachedOHLC = null;
         this.invalidatedBBox = true;
+
+        // The bars are rebuilt below, so any hovered slot from the previous dataset is meaningless.
+        // Clearing it also drops the highlight flags on the reused Bar objects.
+        this.clearHoverHighlight();
+        this.lastBarHoverHtml = '';
+
+        // Bring the wasm value order in line with the renderer's before anything reads the data.
+        if (this.data) {
+            for (const seriesData of this.data)
+                Chart.normalizeSeriesData(seriesData);
+        }
+
+        // The timeline maps timestamps onto dataset indices; it must exist before any series is
+        // windowed or laid out.
+        this.buildTimeline(timeframe);
 
         // The price window is only ever computed here — scrolling does not change it.
         this.calculatePriceWindow();
@@ -560,7 +866,7 @@ export class Chart extends Gfx.Object3D
                 this.removeSeries(this.series[this.series.length - 1]);
         }
         
-        this.scrollTo(0, 0); // Refresh the chart to reflect the new data.
+        //this.scrollTo(0, 0); // Refresh the chart to reflect the new data.
         this.onDataSet?.();
     }
 
@@ -582,6 +888,76 @@ export class Chart extends Gfx.Object3D
         const values = (entry as unknown as { values?: unknown }).values;
 
         return Array.isArray(values) ? values as number[] : [];
+    }
+
+    /**
+     * Index permutation converting the wasm OHLC value order into the renderer's order.
+     *
+     * The wasm `Indi_OHLC` indicator emits one value per `ENUM_INDI_OHLC_MODE` entry, and that
+     * enum is ordered `CLOSE = 0, OPEN = 1, HIGH = 2, LOW = 3` (see `Indi_OHLC.mqh`). The whole
+     * renderer, on the other hand, expects the conventional `[open, high, low, close]` order, so
+     * the values have to be permuted once, as soon as they enter the front-end.
+     */
+    private static readonly WASM_OHLC_ORDER: readonly number[] = [1, 2, 3, 0];
+
+    /**
+     * Reorders the values of an OHLC indicator entry from the wasm order
+     * (`[close, open, high, low]`) into the renderer's order (`[open, high, low, close]`).
+     *
+     * Only the `OHLC` indicator is reordered: other indicators that happen to return four values
+     * (e.g. Heiken Ashi) already use the conventional order, and indicators with any other number
+     * of values are passed through untouched.
+     *
+     * @param indicatorName The `indicator_info.name` of the series the values belong to.
+     * @param values The raw values of a single entry.
+     * @returns The values in `[open, high, low, close]` order, or `values` unchanged.
+     */
+    public static normalizeEntryValues(indicatorName: string | undefined, values: number[]): number[] {
+        if (values.length !== 4 || !indicatorName)
+            return values;
+
+        if (Chart.stripIndicatorIndex(indicatorName) !== 'OHLC')
+            return values;
+
+        return Chart.WASM_OHLC_ORDER.map(index => values[index]);
+    }
+
+    /**
+     * Series data whose entries have already been reordered by `normalizeSeriesData()`.
+     *
+     * Reordering is done in place, so it must never run twice on the same data — otherwise the
+     * values would be permuted back into the wasm order.
+     */
+    private static readonly normalizedSeriesData: WeakSet<TesterValuesColumns> = new WeakSet();
+
+    /**
+     * Reorders every entry of the given series data into the renderer's value order.
+     *
+     * Safe to call repeatedly: data that has already been normalized is skipped.
+     */
+    private static normalizeSeriesData(seriesData: TesterValuesColumns): void {
+        if (Chart.normalizedSeriesData.has(seriesData))
+            return;
+
+        Chart.normalizedSeriesData.add(seriesData);
+
+        const name = seriesData.indicator_info?.name;
+
+        for (const entry of seriesData.values) {
+            const values = Chart.entryValues(entry);
+
+            if (values.length !== 4)
+                continue;
+
+            const normalized = Chart.normalizeEntryValues(name, values);
+
+            if (normalized === values)
+                continue;
+
+            // The wasm layer hands us a plain JS array, so it can be rewritten in place.
+            for (let i = 0; i < normalized.length; i++)
+                values[i] = normalized[i];
+        }
     }
 
     /**
@@ -740,13 +1116,198 @@ export class Chart extends Gfx.Object3D
     }
     
     /**
-     * Return number of bars for the first series in the chart. If there are no series, return 0.
+     * Number of bars covered by the dataset.
+     *
+     * The count comes from the timeline, i.e. from the series running on the chart's own
+     * time-frame. Series have different lengths: an MA only produces values once it has enough
+     * history, so it starts later than the OHLC series, and an indicator that overrides the
+     * time-frame may have far more (or fewer) entries than the chart has bars. Neither can be used
+     * as the chart-wide bar count or as the baseline for scrolling and windowing.
      */
     public getNumBars(): number {
+        if (this.timeline)
+            return this.timeline.length;
+
+        if (this.data)
+            return Chart.getDataLength(this.data);
+
         if (this.series.length === 0)
             return 0;
 
         return this.series[0].bars.length;
+    }
+
+    /**
+     * Number of entries in the longest series of the given dataset.
+     */
+    public static getDataLength(data: TesterValuesColumns[] | null): number {
+        let length = 0;
+
+        for (const seriesData of data ?? []) {
+            const seriesLength = seriesData.values?.length ?? 0;
+
+            if (seriesLength > length)
+                length = seriesLength;
+        }
+
+        return length;
+    }
+
+    /**
+     * The dataset index of the entry a given series row belongs to, or -1 when the row's timestamp
+     * is not part of the timeline.
+     *
+     * Rows are positioned by timestamp rather than by array offset: an MA series starts later than
+     * the OHLC series, so its row 0 must land on the bar it actually belongs to.
+     */
+    public datasetIndexFor(seriesData: TesterValuesColumns, rowIndex: number): number {
+        const row = seriesData.values?.[rowIndex];
+
+        if (!row || !this.timeline)
+            return -1;
+
+        const timeMs = Number(row.timestamp) * 1000;
+
+        if (!Number.isFinite(timeMs))
+            return -1;
+
+        const index = Chart.binarySearchTime(this.timeline, timeMs);
+
+        if (index >= 0)
+            return index;
+
+        // Timestamp sits between two bars — snap it to the nearest one.
+        const insertionPoint = ~index;
+
+        if (insertionPoint === 0)
+            return 0;
+
+        if (insertionPoint >= this.timeline.length)
+            return this.timeline.length - 1;
+
+        const before = this.timeline[insertionPoint - 1];
+        const after = this.timeline[insertionPoint];
+
+        return timeMs - before <= after - timeMs ? insertionPoint - 1 : insertionPoint;
+    }
+
+    /**
+     * Finds `timeMs` in a sorted array of timestamps.
+     *
+     * @returns The index of the matching entry, or `-(insertionPoint) - 1` when absent.
+     */
+    private static binarySearchTime(times: number[], timeMs: number): number {
+        let low = 0;
+        let high = times.length - 1;
+
+        while (low <= high) {
+            const mid = (low + high) >> 1;
+            const value = times[mid];
+
+            if (value === timeMs)
+                return mid;
+
+            if (value < timeMs)
+                low = mid + 1;
+            else
+                high = mid - 1;
+        }
+
+        return -(low) - 1;
+    }
+
+    /**
+     * Timestamp (ms) of the dataset bar at the given dataset index, or 0 when unknown.
+     */
+    public timeAtIndex(datasetIndex: number): number {
+        return this.timeline && datasetIndex >= 0 && datasetIndex < this.timeline.length
+            ? this.timeline[datasetIndex]
+            : 0;
+    }
+
+    /**
+     * Returns the window of dataset indices to show: `[startIndex, endIndexExclusive)`.
+     *
+     * The scroll position is expressed in bars of the timeline, so the window is simply the slice
+     * of the longest series. Series that do not cover a bar simply have no data there.
+     */
+    public getDataWindow(): [number, number] {
+        const total = this.getNumBars();
+        const numBars = Math.max(0, this.numBarsVisible);
+        const start = Math.max(0, Math.min(this.startIndex, total));
+
+        return [start, Math.min(start + numBars, total)];
+    }
+
+    /**
+     * Timestamp (ms) of every dataset index, built from the series that defines the chart's bars.
+     *
+     * The anchor is the series running on the chart's own time-frame, because that is what the
+     * bars represent. Indicators may override the time-frame, so a finer one (e.g. an M1 MA on an
+     * H1 chart) would otherwise provide far more entries than the chart has bars. When no series
+     * matches the chart's time-frame, the longest series is used — that is the one covering the
+     * whole history, since shorter ones (e.g. an MA, which needs `period` bars before its first
+     * value) start later and would place the timeline at the wrong offset.
+     */
+    private timeline: number[] | null = null;
+
+    /**
+     * Rebuilds the timeline from the dataset. Called whenever new data is set.
+     *
+     * @param timeframe Time-frame of the chart's bars, as an `ENUM_TIMEFRAMES` value, or
+     * `undefined` to anchor the timeline on the longest series.
+     */
+    private buildTimeline(timeframe?: number): void {
+        this.timeline = null;
+
+        if (!this.data || this.data.length === 0)
+            return;
+
+        let anchor: TesterValuesColumns | null = null;
+
+        if (timeframe !== undefined) {
+            for (const seriesData of this.data) {
+                if (seriesData.indicator_info?.tf !== timeframe)
+                    continue;
+
+                if ((seriesData.values?.length ?? 0) === 0)
+                    continue;
+
+                if (!anchor || (seriesData.values?.length ?? 0) > (anchor.values?.length ?? 0))
+                    anchor = seriesData;
+            }
+        }
+
+        if (!anchor) {
+            for (const seriesData of this.data) {
+                const length = seriesData.values?.length ?? 0;
+
+                if (length === 0)
+                    continue;
+
+                if (!anchor || length > (anchor.values?.length ?? 0))
+                    anchor = seriesData;
+            }
+        }
+
+        if (!anchor)
+            return;
+
+        const times: number[] = [];
+
+        for (const entry of anchor.values) {
+            const timeMs = Number(entry.timestamp) * 1000;
+
+            times.push(Number.isFinite(timeMs) ? timeMs : 0);
+        }
+
+        // A timeline must be strictly increasing for the binary search to work.
+        for (let i = 1; i < times.length; i++) {
+            if (times[i] <= times[i - 1])
+                times[i] = times[i - 1] + 1;
+        }
+
+        this.timeline = times;
     }
 
     /**
@@ -853,12 +1414,13 @@ export class Chart extends Gfx.Object3D
         this.targetScrollY = y;
     }
 
+    private static readonly TRAILING_BARS = 2;
+
     private getMaxScrollX(): number {
-        const dataLength = this.data?.reduce(
-            (maxLength, seriesData) => Math.max(maxLength, seriesData.values.length ?? 0),
-            0
-        ) ?? 0;
-        const maxStartIndex = Math.max(0, dataLength - this.numBarsVisible);
+        const dataLength = this.getNumBars();
+        // Bars are placed at (index + 1) steps and fade out at the right edge, so the last bar would
+        // sit exactly on the edge and be invisible. Allow scrolling a couple of bars past the data.
+        const maxStartIndex = Math.max(0, dataLength - this.numBarsVisible + Chart.TRAILING_BARS);
 
         return maxStartIndex * this.verticalLineDistance * this.zoom;
     }
@@ -907,6 +1469,10 @@ export class Chart extends Gfx.Object3D
             // keep a static vertical position so they never leave the chart.
             series.position.y = series.isPriceSeries ? this.targetScrollY : 0;
         }
+
+        // The hovered-column guide is positioned from the series offset, so it has to follow the
+        // scroll as well.
+        this.updateHoverColumn();
 
         this.refreshSeriesData();
     }

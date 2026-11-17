@@ -8,7 +8,7 @@
             
             <h1 class="app-title flex flex-0">OPENTERMINAL</h1>
             
-            <div class="flex flex-row flex-1 menu px-4 py-2">
+            <div class="row-0 menu px-4 py-2">
                 
                 <VMenu class="flex">
 
@@ -16,9 +16,33 @@
                         
                         <template #content>
                             
-                            <VMenuItem label="Save project" id="appMenuNewProject" @click="" :close="true" :enabled="false" />
+                            <VMenuItem label="New project" id="appMenuNewProject" @clicked="newProject" :close="true" />
 
-                            <VMenuItem label="Save project as..." id="appMenuNewProject" @click="" :close="true" :enabled="false" />
+                            <VMenuItem label="Projects" id="appMenuLoadProject" :close="false" :enabled="true" @mouseenter="refreshProjects">
+                                <template #content>
+                                    <VMenuItem v-if="projects.length === 0" label="No stored projects" id="appMenuLoadProjectEmpty" :enabled="false" />
+                                    <VMenuItem
+                                        v-for="project in projects"
+                                        :key="project.name"
+                                        :label="project.name"
+                                        :id="`appMenuLoadProject-${project.name}`"
+                                        :close="true"
+                                        @clicked="loadProject(project.name)"
+                                    >
+                                        <template #content>
+                                            <VMenuItem label="Load" :id="`appMenuLoadProject-${project.name}`" :close="true" @clicked="loadProject(project.name)" />
+                                            <VMenuItem label="Rename" :id="`appMenuRenameProject-${project.name}`" :close="true" @clicked="openRenameProjectDialog(project.name)" />
+                                            <VMenuItem label="Delete" :id="`appMenuDeleteProject-${project.name}`" :close="true" @clicked="openDeleteProjectDialog(project.name)" />
+                                        </template>
+                                    </VMenuItem>
+                                </template>
+                            </VMenuItem>
+
+                            <VMenuGroup />
+
+                            <VMenuItem label="Save project" id="appMenuSaveProject" @clicked="saveProject" :close="true" />
+
+                            <VMenuItem label="Save project as..." id="appMenuSaveProjectAs" @clicked="openSaveProjectDialog" :close="true" />
 
                             <VMenuGroup />
 
@@ -43,10 +67,10 @@
                         </template>
                     </VMenuItem>
 
-                    <VMenuItem label="Help" :topMenu="true" id="appMenuHelp">
+                    <VMenuItem label="Debug" :topMenu="true" id="appMenuDebug">
                         <template #content>
                             
-                            <VMenuItem label="Settings" id="appMenuHelpSettings" :close="false">
+                            <VMenuItem label="Settings" id="appMenuDebugSettings" :close="false">
                                 <template #content>
                                     <div class="p-2" style="min-width: 320px; max-width: 480px">
                                         <JsonTreeView :json="settingsJson" colorScheme="dark" :max-depth="3" />
@@ -54,7 +78,7 @@
                                 </template>
                             </VMenuItem>
 
-                            <VMenuItem label="Local State" id="appMenuHelpLocalState" :close="false">
+                            <VMenuItem label="Local State" id="appMenuDebugLocalState" :close="false">
                                 <template #content>
                                     <div class="p-2" style="min-width: 320px; max-width: 480px">
                                         <JsonTreeView :json="localStateJson" colorScheme="dark" :max-depth="3" />
@@ -62,7 +86,7 @@
                                 </template>
                             </VMenuItem>
 
-                            <VMenuItem label="Roaming State" id="appMenuHelpRoamingState" :close="false">
+                            <VMenuItem label="Roaming State" id="appMenuDebugRoamingState" :close="false">
                                 <template #content>
                                     <div class="p-2" style="min-width: 320px; max-width: 480px">
                                         <JsonTreeView :json="roamingStateJson" colorScheme="dark" :max-depth="3" />
@@ -77,8 +101,39 @@
                 </VMenu>
                 
             </div>
+
+            <ElDivider style="width: 20px" />
+
+            <div class="project-name row-0 pl-6 font-bold">{{ $roamingState.projectName ?? 'Untitled project' }}</div>
             
         </div>
+
+        <ElDialog v-model="saveDialogVisible" title="Save project as" width="400px" append-to-body>
+            <ElInput v-model="saveDialogName" placeholder="Project name" @keyup.enter="confirmSaveProject" />
+            <div v-if="saveDialogError" class="text-red-400 text-sm mt-2">{{ saveDialogError }}</div>
+            <template #footer>
+                <ElButton @click="saveDialogVisible = false">Cancel</ElButton>
+                <ElButton type="primary" @click="confirmSaveProject">Save</ElButton>
+            </template>
+        </ElDialog>
+
+        <ElDialog v-model="renameDialogVisible" title="Rename project" width="400px" append-to-body>
+            <ElInput v-model="renameDialogName" placeholder="Project name" @keyup.enter="confirmRenameProject" />
+            <div v-if="renameDialogError" class="text-red-400 text-sm mt-2">{{ renameDialogError }}</div>
+            <template #footer>
+                <ElButton @click="renameDialogVisible = false">Cancel</ElButton>
+                <ElButton type="primary" @click="confirmRenameProject">Rename</ElButton>
+            </template>
+        </ElDialog>
+
+        <ElDialog v-model="deleteDialogVisible" title="Delete project" width="400px" append-to-body>
+            <div class="text-sm">Delete the project "{{ deleteDialogName }}"? This cannot be undone.</div>
+            <div v-if="deleteDialogError" class="text-red-400 text-sm mt-2">{{ deleteDialogError }}</div>
+            <template #footer>
+                <ElButton @click="deleteDialogVisible = false">Cancel</ElButton>
+                <ElButton type="danger" @click="confirmDeleteProject">Delete</ElButton>
+            </template>
+        </ElDialog>
         
         <main class="app-content flex flex-col flex-1">
             
@@ -86,116 +141,218 @@
                 
                 <div class="col">
                     
-                    <VCanvas3D ref="canvas" />
+                    <VCanvas3D ref="canvas" :loading="isChartRunning" />
                     
                 </div>
 
-                <div class="flex flex-col mx-4 min-w-[420px] max-w-[600px] p-4">
+                <div class="side-panel flex flex-col mx-4 min-w-[420px] max-w-[600px] p-4 min-h-0">
 
-                    <div class="flex flex-col flex-1 min-h-0 max-h-full overflow-y-auto gap-6">
+                    <ElTabs v-model="activeTab" class="side-panel-tabs flex flex-1 min-h-0">
 
-                        <div v-for="chart in $roamingState.charts" :key="chart.title" class="chart-container flex flex-col flex-0">
+                        <ElTabPane name="charts" class="side-panel-pane">
 
-                            <div class="chart-container bg-[#111] border border-gray-800 p-2 rounded-lg">
+                            <template #label>
+                                <span class="side-panel-tab-label">
+                                    <ElIcon><List /></ElIcon>
+                                    <span>Charts</span>
+                                </span>
+                            </template>
 
-                                <div class="chart-header flex flex-row flex-1 items-center">
+                            <div class="side-panel-content flex flex-col gap-6">
 
-                                    <div class="chart-title flex flex-1 flex-row">
-                                        <ElInput v-model="chart.title" placeholder="Chart Title" class="flex flex-1" />
-                                    </div>
+                                <div v-for="chart in $roamingState.charts" :key="chart.title" class="chart-container flex flex-col flex-0">
 
-                                    <ElButton type="danger" icon circle size="small" @click="removeChart(chart.uuid)" class="flex ml-2">
-                                        <ElIcon>
-                                            <Delete />
-                                        </ElIcon>
-                                    </ElButton>
+                                    <div class="chart-container bg-[#111] border border-gray-800 p-2 rounded-lg">
 
-                                
-                                </div>
+                                        <div class="chart-header flex flex-row flex-1 items-center">
 
-                                <div class="chart-indicators">
-
-                                    <div
-                                        v-for="(indicator, indicatorIndex) in chart.indicators"
-                                        :key="indicator.uuid"
-                                        class="chart-indicator"
-                                        :class="{
-                                            'is-dragging': dragState.chartId === chart.uuid && dragState.index === indicatorIndex,
-                                            'is-drop-target': dragState.chartId === chart.uuid && dragState.overIndex === indicatorIndex && dragState.index !== indicatorIndex
-                                        }"
-                                        draggable="true"
-                                        @dragstart="onIndicatorDragStart(chart.uuid, indicatorIndex, $event)"
-                                        @dragover.prevent="onIndicatorDragOver(chart.uuid, indicatorIndex, $event)"
-                                        @dragleave="onIndicatorDragLeave(chart.uuid, indicatorIndex)"
-                                        @drop.prevent="onIndicatorDrop(chart.uuid, indicatorIndex, $event)"
-                                        @dragend="onIndicatorDragEnd"
-                                    >
-                                        <div class="indicator-type flex flex-row flex-1 px-1.5 py-1.5">
-                                            <span
-                                                class="indicator-collapse-arrow"
-                                                :class="{ 'is-collapsed': isIndicatorCollapsed(indicator) }"
-                                                :title="isIndicatorCollapsed(indicator) ? 'Expand settings' : 'Collapse settings'"
-                                                @click.stop="toggleIndicatorCollapsed(indicator)"
-                                            >
-                                                <ElIcon><ArrowDown /></ElIcon>
-                                            </span>
-                                            <span class="indicator-drag-handle" title="Drag to reorder">⋮⋮</span>
-                                            <span
-                                                class="indicator-color-bullet"
-                                                :class="{ 'is-hidden': !isIndicatorVisible(chart.uuid, indicator) }"
-                                                :style="{ backgroundColor: getIndicatorColor(chart.uuid, indicator) }"
-                                                :title="isIndicatorVisible(chart.uuid, indicator) ? `Hide ${indicator.typeId} on the chart` : `Show ${indicator.typeId} on the chart`"
-                                                @click="toggleIndicatorVisibility(chart.uuid, indicator)"
-                                            ></span>
-                                            <div class="indicator-name flex flex-1 ml-1.5" :class="{ 'is-hidden': !isIndicatorVisible(chart.uuid, indicator) }">
-                                                {{ indicator.typeId }}
+                                            <div class="chart-title flex flex-1 flex-row">
+                                                <ElInput v-model="chart.title" placeholder="Chart Title" class="flex flex-1" />
                                             </div>
-                                            <ElButton type="danger" circle icon size="small" @click="removeIndicator(chart.uuid, indicator.uuid)">
+
+                                            <ElButton type="danger" icon circle size="small" @click="removeChart(chart.uuid)" class="flex ml-2">
                                                 <ElIcon>
                                                     <Delete />
                                                 </ElIcon>
                                             </ElButton>
+
                                         </div>
 
-                                        <div
-                                            v-if="getIndicatorSettingsUI(indicator.typeId)"
-                                            class="indicator-config-wrapper"
-                                            :class="{ 'is-collapsed': isIndicatorCollapsed(indicator) }"
-                                        >
-                                            <div class="indicator-config-inner">
-                                                <div class="indicator-config p-3">
-                                                    <component :is="getIndicatorSettingsUI(indicator.typeId)" :roamingState="$roamingState.charts.find(c => c.uuid === chart.uuid).indicators.find(i => i.uuid === indicator.uuid)   " />
+                                        <div class="chart-tick-source flex flex-row items-center mb-2">
+                                            <span class="chart-tick-source-label">Ticks</span>
+                                            <ElSelect
+                                                :model-value="chart.tickSource?.path ?? ''"
+                                                class="flex flex-1"
+                                                placeholder="Randomized ticks"
+                                                clearable
+                                                @update:model-value="setChartTickSource(chart.uuid, $event)"
+                                            >
+                                                <ElOption
+                                                    v-for="source in tickSources"
+                                                    :key="source.path"
+                                                    :label="source.label"
+                                                    :value="source.path"
+                                                />
+                                            </ElSelect>
+                                        </div>
+
+                                        <div class="chart-tick-source flex flex-row items-center mb-2">
+                                            <span class="chart-tick-source-label">Time-frame</span>
+                                            <ElSelect
+                                                :model-value="getChartTimeframe(chart)"
+                                                class="flex flex-1"
+                                                placeholder="Time-frame"
+                                                @update:model-value="setChartTimeframe(chart.uuid, $event)"
+                                            >
+                                                <ElOption
+                                                    v-for="timeframe in timeframes"
+                                                    :key="timeframe.id"
+                                                    :label="timeframe.label"
+                                                    :value="timeframe.id"
+                                                />
+                                            </ElSelect>
+                                        </div>
+
+                                        <div class="chart-indicators">
+
+                                            <div
+                                                v-for="(indicator, indicatorIndex) in chart.indicators"
+                                                :key="indicator.uuid"
+                                                class="chart-indicator"
+                                                :class="{
+                                                    'is-dragging': dragState.chartId === chart.uuid && dragState.index === indicatorIndex,
+                                                    'is-drop-target': dragState.chartId === chart.uuid && dragState.overIndex === indicatorIndex && dragState.index !== indicatorIndex
+                                                }"
+                                                draggable="true"
+                                                @dragstart="onIndicatorDragStart(chart.uuid, indicatorIndex, $event)"
+                                                @dragover.prevent="onIndicatorDragOver(chart.uuid, indicatorIndex, $event)"
+                                                @dragleave="onIndicatorDragLeave(chart.uuid, indicatorIndex)"
+                                                @drop.prevent="onIndicatorDrop(chart.uuid, indicatorIndex, $event)"
+                                                @dragend="onIndicatorDragEnd"
+                                            >
+                                                <div class="indicator-type flex flex-row flex-1 px-1.5 py-1.5">
+                                                    <span
+                                                        class="indicator-collapse-arrow"
+                                                        :class="{ 'is-collapsed': isIndicatorCollapsed(indicator) }"
+                                                        :title="isIndicatorCollapsed(indicator) ? 'Expand settings' : 'Collapse settings'"
+                                                        @click.stop="toggleIndicatorCollapsed(indicator)"
+                                                    >
+                                                        <ElIcon><ArrowDown /></ElIcon>
+                                                    </span>
+                                                    <span class="indicator-drag-handle" title="Drag to reorder">⋮⋮</span>
+                                                    <span
+                                                        class="indicator-color-bullet"
+                                                        :class="{ 'is-hidden': !isIndicatorVisible(chart.uuid, indicator) }"
+                                                        :style="{ backgroundColor: getIndicatorColor(chart.uuid, indicator) }"
+                                                        :title="isIndicatorVisible(chart.uuid, indicator) ? `Hide ${indicator.typeId} on the chart` : `Show ${indicator.typeId} on the chart`"
+                                                        @click="toggleIndicatorVisibility(chart.uuid, indicator)"
+                                                    ></span>
+                                                    <div class="indicator-name flex flex-1 ml-1.5" :class="{ 'is-hidden': !isIndicatorVisible(chart.uuid, indicator) }">
+                                                        {{ indicator.typeId }}
+                                                    </div>
+                                                    <ElButton type="danger" circle icon size="small" @click="removeIndicator(chart.uuid, indicator.uuid)">
+                                                        <ElIcon>
+                                                            <Delete />
+                                                        </ElIcon>
+                                                    </ElButton>
+                                                </div>
+
+                                                <div
+                                                    v-if="getIndicatorSettingsUI(indicator.typeId)"
+                                                    class="indicator-config-wrapper"
+                                                    :class="{ 'is-collapsed': isIndicatorCollapsed(indicator) }"
+                                                >
+                                                    <div class="indicator-config-inner">
+                                                        <div class="indicator-config p-3">
+                                                            <div class="attribute indicator-timeframe">
+                                                                <div class="attribute-label">Time-frame</div>
+                                                                <div class="attribute-value">
+                                                                    <ElSelect
+                                                                        :model-value="getIndicatorTimeframe(indicator)"
+                                                                        class="flex flex-1"
+                                                                        placeholder="Same as chart"
+                                                                        @update:model-value="setIndicatorTimeframe(chart.uuid, indicator.uuid, $event)"
+                                                                    >
+                                                                        <ElOption label="Same as chart" :value="indicatorTimeframeChart" />
+                                                                        <ElOption
+                                                                            v-for="timeframe in timeframes"
+                                                                            :key="timeframe.id"
+                                                                            :label="timeframe.label"
+                                                                            :value="timeframe.id"
+                                                                        />
+                                                                    </ElSelect>
+                                                                </div>
+                                                            </div>
+                                                            <component :is="getIndicatorSettingsUI(indicator.typeId)" :roamingState="$roamingState.charts.find(c => c.uuid === chart.uuid).indicators.find(i => i.uuid === indicator.uuid)   " />
+                                                        </div>
+                                                    </div>
                                                 </div>
                                             </div>
+
                                         </div>
+
+                                        <div class="add-indicator-button mt-2 flex justify-end">
+                                            <ElButton class="row" v-popup="{ popup: addIndicatorContextMenuInstance, event: 'click', data: { chartId: chart.uuid } }">
+                                                Add Indicator
+                                                <ElIcon class="ml-2">
+                                                    <ArrowDown />
+                                                </ElIcon>
+                                            </ElButton>
+
+                                            <ElButton type="primary" class="row" @click="runChart(chart.uuid)" :disabled="isChartRunning || chart.indicators.length == 0">
+                                                Run
+                                            </ElButton>
+                                        </div>
+
                                     </div>
 
                                 </div>
 
-                                <div class="add-indicator-button mt-2 flex justify-end">
-                                    <ElButton type="primary" class="flex flex-1" @click="runChart(chart.uuid)" :disabled="chart.indicators.length == 0">
-                                        Run
-                                    </ElButton>
-
-                                    <ElButton type="" v-popup="{ popup: addIndicatorContextMenuInstance, event: 'click', data: { chartId: chart.uuid } }">
-                                        Add Indicator
-                                        <ElIcon class="ml-2">
-                                            <ArrowDown />
-                                        </ElIcon>
+                                <div class="add-chart-button flex flex-row justify-end">
+                                    <ElButton type="default" class="flex flex-1 max-w-[200px]" @click="addChart()" disabled>
+                                        Add Chart
                                     </ElButton>
                                 </div>
 
                             </div>
 
-                        </div>
+                        </ElTabPane>
 
-                        <div class="add-chart-button flex flex-row justify-end">
-                            <ElButton type="default" class="flex flex-1 max-w-[200px]" @click="addChart()">
-                                Add Chart
-                            </ElButton>
-                        </div>
+                        <ElTabPane name="ticks" class="side-panel-pane">
 
-                    </div>
+                            <template #label>
+                                <span class="side-panel-tab-label">
+                                    <ElIcon><Upload /></ElIcon>
+                                    <span>Upload Ticks</span>
+                                </span>
+                            </template>
+
+                            <div class="side-panel-content flex flex-col gap-6">
+
+                                <VTicksUpload class="ticks-upload-container flex flex-0" @uploaded="onTicksUploaded" />
+
+                            </div>
+
+                        </ElTabPane>
+
+                        <ElTabPane name="opfs" class="side-panel-pane">
+
+                            <template #label>
+                                <span class="side-panel-tab-label">
+                                    <ElIcon><FolderOpened /></ElIcon>
+                                    <span>Browser Storage</span>
+                                </span>
+                            </template>
+
+                            <div class="side-panel-content flex flex-col gap-6">
+
+                                <VOPFSExplorer class="opfs-explorer-container flex flex-0" />
+
+                            </div>
+
+                        </ElTabPane>
+
+                    </ElTabs>
 
                 </div>
 
@@ -232,7 +389,9 @@
     import VMenuGroup from './components/menu/VMenuGroup.vue';
     import VMenuItem from './components/menu/VMenuItem.vue';
     import VCanvas3D from './components/rendering/VCanvas3D.vue';
-    import { ElIcon } from "element-plus";
+    import VOPFSExplorer from './components/data/opfs/VOPFSExplorer.vue';
+    import VTicksUpload from './components/data/VTicksUpload.vue';
+    import { ElDivider, ElIcon } from "element-plus";
     import VPopUp from "./components/menu/VPopUp.vue";
     import { type ComponentInstance } from "vue";
     import { markRaw } from "vue";
@@ -240,10 +399,28 @@
     import { Series } from "./api/rendering/objects/Series";
     import { ChartObjectManipulator } from "./api/rendering/plugins/chart/ChartObjectManipulator";
     import { JsonTreeView } from 'json-tree-view-vue3';
+    import { opfs } from "./api/OPFS";
+    import { NotFound } from "./api/Throwables";
+    import { listAppProjects, loadAppProject, normalizeAppProjectName, saveAppProject, renameAppProject, deleteAppProject, type AppProjectInfo } from "./api/data/AppProjects";
+    import { APP_TIMEFRAMES, normalizeAppTimeframe, type AppTimeframe } from "./api/data/AppTimeframes";
+
+    /**
+     * Delay (in milliseconds) used to coalesce bursts of OPFS changes into a single tick source
+     * refresh. Uploading ticks emits one change per file.
+     */
+    const TICK_SOURCES_REFRESH_DEBOUNCE = 150;
+
+    /**
+     * Value of the indicator's time-frame selector that makes the indicator follow the chart's
+     * time-frame. It is never stored in the roaming state.
+     */
+    const INDICATOR_TIMEFRAME_CHART = 'chart';
     
     @Component({
         components: {
             VCanvas3D,
+            VOPFSExplorer,
+            VTicksUpload,
             VMenu,
             VMenuItem,
             VMenuGroup,
@@ -261,11 +438,25 @@
         public charts: Chart[] = [];
 
         /**
+         * Name of the tab currently shown in the right-hand side panel.
+         *
+         * One of `charts`, `ticks` or `opfs`.
+         */
+        public activeTab: string = 'charts';
+
+        /**
          * Incremented after a chart finishes running. Charts are `markRaw`, so their series are not
          * reactive; reading this counter in the template makes the color bullets re-render once the
          * series (and therefore their colors) exist.
          */
         public chartRunVersion: number = 0;
+
+        /** Number of chart runs currently in progress. */
+        public runningChartCount: number = 0;
+
+        get isChartRunning(): boolean {
+            return this.runningChartCount > 0;
+        }
 
         /**
          * State of the indicator drag-and-drop reordering.
@@ -275,6 +466,25 @@
             index: -1,
             overIndex: -1
         };
+
+        /**
+         * Tick data folders found in the OPFS, offered as tick sources for the charts.
+         *
+         * Each entry is a `ticks/<folder>/<symbol>` directory, i.e. one uploaded symbol.
+         */
+        public tickSources: { path: string; label: string; symbol: string }[] = [];
+
+        /** Time-frames offered by the chart and indicator selectors. */
+        public timeframes: readonly AppTimeframe[] = APP_TIMEFRAMES;
+
+        /** Value of the indicator's time-frame selector meaning "Same as chart". */
+        public indicatorTimeframeChart: string = INDICATOR_TIMEFRAME_CHART;
+
+        /** Unregisters the OPFS change listener, or `null` when not subscribed. */
+        private unsubscribeFromOPFS: (() => void) | null = null;
+
+        /** Timer that coalesces OPFS change notifications into a single tick source refresh. */
+        private tickSourcesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
         private stringifyMaxDepth(value: object): string {
             const depths = new WeakMap<object, number>();
@@ -306,16 +516,345 @@
         }
 
 
+        /** Projects stored in the OPFS, shown in the `Load project` menu. */
+        public projects: AppProjectInfo[] = [];
+
+        public saveDialogVisible: boolean = false;
+        public saveDialogName: string = '';
+        public saveDialogError: string = '';
+
+        public renameDialogVisible: boolean = false;
+        /** Name of the project being renamed, as stored in the OPFS. */
+        public renameDialogProject: string = '';
+        public renameDialogName: string = '';
+        public renameDialogError: string = '';
+
+        public deleteDialogVisible: boolean = false;
+        /** Name of the project the delete confirmation is about. */
+        public deleteDialogName: string = '';
+        public deleteDialogError: string = '';
+
+        public async refreshProjects(): Promise<void> {
+            try {
+                this.projects = await listAppProjects();
+            }
+            catch (error) {
+                console.error('Failed to list the stored projects.', error);
+            }
+        }
+
+        /** Replaces the roaming state with the default (empty) one. */
+        public newProject(): void {
+            const ohlc = this.$settings.indicators.find(ind => ind.typeId === 'OHLC');
+
+            this.$roamingState.replaceCharts([{
+                uuid: crypto.randomUUID(),
+                title: 'Untitled Chart',
+                timeframe: normalizeAppTimeframe(undefined),
+                indicators: [{
+                    uuid: 'indicator0',
+                    typeId: 'OHLC',
+                    config: JSON.parse(JSON.stringify(ohlc?.defaultConfig ?? {})),
+                    visible: true,
+                    color: Series.formatColor(Series.getSeriesColor(0))
+                }]
+            }]);
+            this.$roamingState.projectName = null;
+            this.syncWithRoamingState();
+        }
+
+        public async loadProject(name: string): Promise<void> {
+            try {
+                const data = await loadAppProject(name);
+
+                this.$roamingState.replaceCharts(Array.isArray(data?.charts) ? data.charts : []);
+                this.$roamingState.projectName = name;
+                this.syncWithRoamingState();
+            }
+            catch (error) {
+                console.error(`Failed to load the project "${name}".`, error);
+                alert(`Failed to load the project "${name}": ${error instanceof Error ? error.message : error}`);
+            }
+        }
+
+        public openSaveProjectDialog(): void {
+            this.saveDialogName = this.$roamingState.projectName ?? '';
+            this.saveDialogError = '';
+            this.saveDialogVisible = true;
+        }
+
+        /** Saves over the current project, or asks for a name when there is none. */
+        public async saveProject(): Promise<void> {
+            if (!this.$roamingState.projectName) {
+                this.openSaveProjectDialog();
+                return;
+            }
+
+            try {
+                await this.storeProject(this.$roamingState.projectName);
+            }
+            catch (error) {
+                console.error('Failed to save the project.', error);
+                alert(`Failed to save the project: ${error instanceof Error ? error.message : error}`);
+            }
+        }
+
+        public async confirmSaveProject(): Promise<void> {
+            try {
+                const name = normalizeAppProjectName(this.saveDialogName);
+
+                await this.storeProject(name);
+                this.saveDialogVisible = false;
+            }
+            catch (error) {
+                this.saveDialogError = error instanceof Error ? error.message : String(error);
+            }
+        }
+
+        private async storeProject(name: string): Promise<void> {
+            await saveAppProject(name, { charts: JSON.parse(JSON.stringify(this.$roamingState.charts)) });
+            this.$roamingState.projectName = name;
+            await this.refreshProjects();
+        }
+
+        /** Opens the rename dialog for the given stored project. */
+        public openRenameProjectDialog(name: string): void {
+            this.renameDialogProject = name;
+            this.renameDialogName = name;
+            this.renameDialogError = '';
+            this.renameDialogVisible = true;
+        }
+
+        /** Renames the project in the OPFS and keeps the open project pointing at the new name. */
+        public async confirmRenameProject(): Promise<void> {
+            try {
+                const newName = await renameAppProject(this.renameDialogProject, this.renameDialogName);
+
+                // The renamed project may be the one that is currently open.
+                if (this.$roamingState.projectName === this.renameDialogProject)
+                    this.$roamingState.projectName = newName;
+
+                this.renameDialogVisible = false;
+                await this.refreshProjects();
+            }
+            catch (error) {
+                this.renameDialogError = error instanceof Error ? error.message : String(error);
+            }
+        }
+
+        /** Opens the delete confirmation for the given stored project. */
+        public openDeleteProjectDialog(name: string): void {
+            this.deleteDialogName = name;
+            this.deleteDialogError = '';
+            this.deleteDialogVisible = true;
+        }
+
+        /** Deletes the project from the OPFS after the user confirmed it. */
+        public async confirmDeleteProject(): Promise<void> {
+            try {
+                await deleteAppProject(this.deleteDialogName);
+
+                // The deleted project may be the one that is currently open, so it must not be
+                // saved over by accident anymore.
+                if (this.$roamingState.projectName === this.deleteDialogName)
+                    this.$roamingState.projectName = null;
+
+                this.deleteDialogVisible = false;
+                await this.refreshProjects();
+            }
+            catch (error) {
+                this.deleteDialogError = error instanceof Error ? error.message : String(error);
+            }
+        }
+
         public async mounted(): Promise<void> {
             this.addIndicatorContextMenuInstance = this.$refs.addIndicatorContextMenu;
 
-            // Adding charts
-            this.$roamingState.charts.forEach(chartConfig => {
-                this.addChart(chartConfig);
+            // Any OPFS change (a project being saved, renamed or deleted, ticks being uploaded,
+            // or an action performed in the OPFS explorer) may add or remove a tick source, so
+            // the selector is rebuilt from the current OPFS contents.
+            this.unsubscribeFromOPFS = opfs.onChange(() => this.scheduleTickSourcesRefresh());
 
-                // Running each chart asynchronously.
-                this.runChart(chartConfig.uuid);
-            });
+            this.refreshProjects();
+
+            // Keeps the overlay up while tick sources load, before the first chart run starts.
+            this.runningChartCount++;
+
+            const isFirstVisit = localStorage.getItem('AppRoamingState') === null;
+
+            try {
+                await this.refreshTickSources();
+
+                if (isFirstVisit) {
+                    this.newProject();
+                    return;
+                }
+
+                // Adding charts
+                this.$roamingState.charts.forEach(chartConfig => {
+                    this.addChart(chartConfig);
+
+                    // Running each chart asynchronously.
+                    this.runChart(chartConfig.uuid);
+                });
+            }
+            finally {
+                this.runningChartCount--;
+            }
+        }
+
+        public unmounted(): void {
+            this.unsubscribeFromOPFS?.();
+            this.unsubscribeFromOPFS = null;
+
+            this.cancelScheduledTickSourcesRefresh();
+        }
+
+        /**
+         * Rebuilds the list of tick sources from the folders stored under `ticks` in the OPFS.
+         *
+         * The upload panel stores ticks as `ticks/<folder>/<symbol>/<file>.csv`, so every
+         * directory two levels deep is one selectable source.
+         */
+        public async refreshTickSources(): Promise<void> {
+            this.cancelScheduledTickSourcesRefresh();
+
+            const sources: { path: string; label: string; symbol: string }[] = [];
+
+            try {
+                for (const folder of await opfs.listEntries('ticks')) {
+                    if (folder.kind !== 'directory')
+                        continue;
+
+                    for (const symbol of await opfs.listEntries(folder.fullPath)) {
+                        if (symbol.kind !== 'directory')
+                            continue;
+
+                        sources.push({
+                            path: symbol.fullPath,
+                            label: `${folder.name} / ${symbol.name}`,
+                            symbol: symbol.name
+                        });
+                    }
+                }
+            }
+            catch (error) {
+                // Nothing uploaded yet, so there is nothing to offer.
+                if (!(error instanceof NotFound))
+                    console.error('Failed to list the tick sources stored in the OPFS.', error);
+            }
+
+            this.tickSources = sources.sort((a, b) => a.label.localeCompare(b.label));
+        }
+
+        /**
+         * Schedules a tick source refresh, replacing a refresh that is already pending.
+         *
+         * Uploading ticks emits one OPFS change per file, so the refresh is debounced to avoid
+         * walking the whole `ticks` tree once per uploaded file.
+         */
+        private scheduleTickSourcesRefresh(): void {
+            this.cancelScheduledTickSourcesRefresh();
+
+            this.tickSourcesRefreshTimer = setTimeout(() => {
+                this.tickSourcesRefreshTimer = null;
+
+                this.refreshTickSources().catch(error => {
+                    console.error('Failed to refresh the tick sources.', error);
+                });
+            }, TICK_SOURCES_REFRESH_DEBOUNCE);
+        }
+
+        private cancelScheduledTickSourcesRefresh(): void {
+            if (this.tickSourcesRefreshTimer === null)
+                return;
+
+            clearTimeout(this.tickSourcesRefreshTimer);
+            this.tickSourcesRefreshTimer = null;
+        }
+
+        /**
+         * Points the chart at the given tick source and re-runs it, so the new ticks are used.
+         *
+         * @param chartId UUID of the chart to configure.
+         * @param path OPFS folder of the tick source, or an empty value for randomized ticks.
+         */
+        public async setChartTickSource(chartId: string, path: string | null): Promise<void> {
+            const chart = this.$roamingState.charts.find(chart => chart.uuid === chartId);
+
+            if (!chart)
+                return;
+
+            const source = this.tickSources.find(candidate => candidate.path === path);
+
+            chart.tickSource = source
+                ? { path: source.path, symbol: source.symbol }
+                : undefined;
+
+            await this.runChart(chartId);
+        }
+
+        /**
+         * Returns the time-frame the chart's bars are built on.
+         *
+         * Charts saved before time-frames were selectable have none, so the default one is shown
+         * instead of an empty selector.
+         */
+        public getChartTimeframe(chart: { timeframe?: string }): string {
+            return normalizeAppTimeframe(chart.timeframe);
+        }
+
+        /**
+         * Sets the chart's time-frame and re-runs it, so its bars are rebuilt on the new one.
+         *
+         * Indicators that follow the chart ("Same as chart") move along with it.
+         *
+         * @param chartId UUID of the chart to configure.
+         * @param timeframe Time-frame id from `APP_TIMEFRAMES`.
+         */
+        public async setChartTimeframe(chartId: string, timeframe: string | null): Promise<void> {
+            const chart = this.$roamingState.charts.find(chart => chart.uuid === chartId);
+
+            if (!chart)
+                return;
+
+            chart.timeframe = normalizeAppTimeframe(timeframe);
+
+            await this.runChart(chartId);
+        }
+
+        /**
+         * Returns the time-frame configured on the given indicator.
+         *
+         * Indicators that do not override the chart's time-frame report the "Same as chart"
+         * sentinel, so the selector shows that as a real selection instead of a placeholder.
+         */
+        public getIndicatorTimeframe(indicator: { timeframe?: string }): string {
+            return indicator.timeframe ?? INDICATOR_TIMEFRAME_CHART;
+        }
+
+        /**
+         * Sets the indicator's time-frame and re-runs the chart, so the indicator is recalculated
+         * on it.
+         *
+         * @param chartId UUID of the chart the indicator belongs to.
+         * @param indicatorId UUID of the indicator to configure.
+         * @param timeframe Time-frame id from `APP_TIMEFRAMES`, or the "Same as chart" sentinel.
+         */
+        public async setIndicatorTimeframe(chartId: string, indicatorId: string, timeframe: string | null): Promise<void> {
+            const chart = this.$roamingState.charts.find(chart => chart.uuid === chartId);
+            const indicator = chart?.indicators.find(indicator => indicator.uuid === indicatorId);
+
+            if (!chart || !indicator)
+                return;
+
+            // "Same as chart" drops the override instead of storing an explicit copy of the
+            // chart's time-frame, so the indicator keeps following the chart when it changes.
+            indicator.timeframe = timeframe && timeframe !== INDICATOR_TIMEFRAME_CHART
+                ? normalizeAppTimeframe(timeframe)
+                : undefined;
+
+            await this.runChart(chartId);
         }
 
         /**
@@ -331,6 +870,7 @@
                 config = {
                     uuid: crypto.randomUUID(),
                     title: 'Untitled Chart',
+                    timeframe: normalizeAppTimeframe(undefined),
                     indicators: []
                 };
 
@@ -360,8 +900,10 @@
 
             // Removing the chart from the scene as well, otherwise it would keep rendering and a
             // later undo would mount a second chart with the same UUID next to it.
-            if (chart)
+            if (chart) {
                 this.canvas.scene.remove(chart);
+                chart.dispose();
+            }
 
             this.$localState.unmounted(chartId);
             this.$roamingState.charts = this.$roamingState.charts.filter(chart => chart.uuid !== chartId);
@@ -404,6 +946,7 @@
                     continue;
 
                 this.canvas.scene.remove(chart);
+                chart.dispose();
                 this.$localState.unmounted(chart.uuid);
                 this.charts = this.charts.filter(candidate => candidate.uuid !== chart.uuid);
             }
@@ -463,19 +1006,38 @@
 
             console.log(`Running chart with ID: ${chartId}`, chart, chartLocalState);
 
-            await chartLocalState.runner.test();
+            this.runningChartCount++;
 
-            // Apply the persisted per-indicator visibility to the freshly created series.
-            this.applyIndicatorVisibility(chartId);
+            return new Promise<void>(resolve => {
+                requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+            })
+                .then(() => chartLocalState.runner.test())
+                .then(() => {
+                    // Apply the persisted per-indicator visibility to the freshly created series.
+                    this.applyIndicatorVisibility(chartId);
 
-            // Charts are markRaw, so bump a reactive counter to refresh the indicator color bullets.
-            this.chartRunVersion++;
+                    // Charts are markRaw, so bump a reactive counter to refresh the indicator color bullets.
+                    this.chartRunVersion++;
 
-            const chartObjectManipulator = this.canvas.renderer?.getRenderPass('main')?.tryGetPlugin(ChartObjectManipulator);
-            if (chartObjectManipulator) {
-                chartObjectManipulator.setCurrentChart(chartLocalState.threejs.chart);
-                chartObjectManipulator.centerCameraOnChart();
-            }
+                    const chartObjectManipulator = this.canvas.renderer?.getRenderPass('main')?.tryGetPlugin(ChartObjectManipulator);
+                    if (chartObjectManipulator) {
+                        chartObjectManipulator.setCurrentChart(chartLocalState.threejs.chart);
+                        chartObjectManipulator.centerCameraOnChart();
+                    }
+                })
+                .finally(() => {
+                    this.runningChartCount--;
+                });
+        }
+
+        /**
+         * Rebuilds the tick source selector after tick files have been stored, so the new source
+         * shows up without the user having to reload the page.
+         */
+        public async onTicksUploaded(): Promise<void> {
+            // The explorer refreshes itself through the OPFS change notifications, so only the
+            // tick source selector has to be rebuilt here.
+            await this.refreshTickSources();
         }
 
         public getIndicatorSettingsUI(typeId: string): any {
@@ -660,6 +1222,10 @@
     .app-header {
     }
 
+    .project-name {
+        color: #bbb;
+    }
+
     .app-title {
         font-size: 16px;
         font-weight: 700;
@@ -670,8 +1236,60 @@
         overflow: hidden;
     }
 
+    // Right-hand side panel: the tab header stays put while the active tab scrolls.
+    .side-panel {
+        min-height: 0;
+    }
+
+    .side-panel-tabs {
+        min-height: 0;
+
+        :deep(.el-tabs__header) {
+            margin-bottom: 8px;
+        }
+
+        // The content area is the only part that may grow, so the header never scrolls away.
+        :deep(.el-tabs__content) {
+            display: flex;
+            flex-direction: column;
+            flex: 1 1 auto;
+            min-height: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        :deep(.el-tab-pane) {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+    }
+
+    .side-panel-content {
+        padding-right: 4px;
+    }
+
+    .side-panel-tab-label {
+        display: inline-flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 6px;
+    }
+
     .chart-header {
         margin-bottom: 8px;
+    }
+
+    .chart-tick-source {
+        gap: 8px;
+    }
+
+    .chart-tick-source-label {
+        flex: 0 0 auto;
+        // Fixed width so the Ticks and Time-frame selectors line up with each other.
+        min-width: 80px;
+        color: #888;
     }
 
     .chart-title {
@@ -800,6 +1418,12 @@
             grid-template-rows: 0fr;
             opacity: 0;
         }
+    }
+
+    // The time-frame selector is rendered by the app, not by the indicator's own settings
+    // component, so it needs its own spacing to the fields below it.
+    .indicator-timeframe {
+        margin-bottom: 1rem;
     }
 
 </style>

@@ -6,8 +6,13 @@ import createModule from 'fx31337-wasm/dist/IndicatorTest.js';
 import { TesterValues } from 'fx31337-wasm/lib/types/TesterValues';
 import { AppStaticSettings } from '../data/AppStaticSettings';
 import { IndicatorBase } from 'fx31337-wasm/lib/types/Indicators/IndicatorBase';
+import { type Indi_TickProvider } from 'fx31337-wasm/lib/types/Indicators/Indi_TickProvider';
+import { type IndicatorTf } from 'fx31337-wasm/lib/types/Indicators/IndicatorTf';
 import { ENUM_IDATA_VALUE_RANGE_ToString } from 'fx31337-wasm/lib/types/enums/ENUM_IDATA_VALUE_RANGE';
 import { ENUM_DATATYPE_ToString } from 'fx31337-wasm/lib/types/enums/ENUM_DATATYPE';
+import { opfs, type OPFSFile } from '../OPFS';
+import { NotFound } from '../Throwables';
+import { normalizeAppTimeframe, resolveAppTimeframe } from '../data/AppTimeframes';
 
 export class Runner extends Test {
 
@@ -32,11 +37,20 @@ export class Runner extends Test {
         this.chartConfig = chartConfig;
     }
 
+    /** Promise of the run started by the library, which does not await it. */
+    private pendingRun?: Promise<any>;
+
     /**
-     * Runs the test using the specified library module.
+     * Starts the run using the specified library module.
      * @param lib The library module to be used for running the test.
      */
-    async run(lib: LibModule): Promise<any> {
+    run(lib: LibModule): Promise<any> {
+        this.pendingRun = this.execute(lib);
+
+        return this.pendingRun;
+    }
+
+    private async execute(lib: LibModule): Promise<any> {
         lib.Tester.Init();
 
         // Embind objects own C++ instances that must be released explicitly, otherwise Embind
@@ -53,22 +67,53 @@ export class Runner extends Test {
         };
 
         try {
-            const ticker = track(new lib.indicators.TickProvider({ symbol: 'EURUSD' }));
+            const tickSource = this.chartConfig.tickSource;
+            const symbol = tickSource?.symbol || 'EURUSD';
+
+            const ticker = track(new lib.indicators.TickProvider({ symbol }));
 
             lib.Tester.Reset();
 
-            const tfM1 = track(new lib.indicators.Tf(lib.timeframes.M1));
-            tfM1.SetSource(ticker);
+            // One candle indicator per time-frame, shared by every indicator that runs on it.
+            // All of them are fed by the same tick provider, so the ticks are aggregated into
+            // bars of each time-frame independently.
+            const timeframes = new Map<string, IndicatorTf>();
+
+            const getTimeframe = (id: string): IndicatorTf => {
+                const normalized = normalizeAppTimeframe(id);
+                const existing = timeframes.get(normalized);
+
+                if (existing)
+                    return existing;
+
+                const timeframe = track(new lib.indicators.Tf(lib.timeframes[normalized as keyof typeof lib.timeframes]));
+                timeframe.SetSource(ticker);
+                timeframes.set(normalized, timeframe);
+
+                return timeframe;
+            };
 
             this.chartConfig.indicators.forEach(indicatorConfig => {
-                const indicatorFactory = AppStaticSettings.indicators.find(ind => ind.typeId === indicatorConfig.typeId)?.factory;
-                const indicator = track((indicatorFactory!)(lib, indicatorConfig.config));
+                const indicatorType = AppStaticSettings.indicators.find(ind => ind.typeId === indicatorConfig.typeId);
+                const indicatorFactory = indicatorType?.factory;
+
+                // Cleared number inputs and stale saved configs leave null/undefined values, which the WASM constructors reject.
+                const config: Record<string, unknown> = { ...indicatorConfig.config };
+                for (const [key, fallback] of Object.entries(indicatorType?.defaultConfig ?? {})) {
+                    if (config[key] === null || config[key] === undefined)
+                        config[key] = fallback;
+                }
+
+                // An indicator without its own time-frame follows the chart ("Same as chart").
+                const indicatorTimeframe = resolveAppTimeframe(this.chartConfig.timeframe, indicatorConfig.timeframe);
+
+                const indicator = track((indicatorFactory!)(lib, config));
                 indicator.SetName(indicatorConfig.typeId);
-                indicator.SetSource(tfM1);
+                indicator.SetSource(getTimeframe(indicatorTimeframe));
                 lib.Tester.Add(indicator);
             });
 
-            lib.Tester.FeedTickProvider(ticker);
+            await this.feedTicks(lib, ticker, tickSource?.path);
 
             // Process all ticks through the indicator pipeline.
             lib.Tester.RunAllTicks();
@@ -79,10 +124,12 @@ export class Runner extends Test {
             const testerValues = lib.Tester.GetValues(BigInt(0), BigInt(0), 0, false);
 
             for (const indicator of testerValues?.timestep_based) {
-                console.log(`Indicator: ${indicator.indicator_info.name}, Symbol: ${indicator.indicator_info.symbol}, Symbol Digits: ${indicator.indicator_info.symbol_digits}, Data Type: ${ENUM_DATATYPE_ToString(indicator.indicator_info.data_type)}, Value Range: ${ENUM_IDATA_VALUE_RANGE_ToString(indicator.indicator_info.value_range)}, Color: ${indicator.indicator_info.color}, Values:`, indicator.values);
+                console.log(`Indicator: ${indicator.indicator_info.name}, Symbol: ${indicator.indicator_info.symbol}, Symbol Digits: ${indicator.indicator_info.symbol_digits}, Time-frame: ${indicator.indicator_info.tf}, Data Type: ${ENUM_DATATYPE_ToString(indicator.indicator_info.data_type)}, Value Range: ${ENUM_IDATA_VALUE_RANGE_ToString(indicator.indicator_info.value_range)}, Color: ${indicator.indicator_info.color}, Values:`, indicator.values);
             }
 
-            this.chart.setData(testerValues?.timestep_based);
+            // The chart's bars are built on its own time-frame, even when some indicators override
+            // it, so the timeline is anchored on the series running on that time-frame.
+            this.chart.setData(testerValues?.timestep_based, lib.timeframes[normalizeAppTimeframe(this.chartConfig.timeframe) as keyof typeof lib.timeframes]);
         }
         finally {
             // Release our handles in creation order, then let the platform drop its own references.
@@ -101,7 +148,56 @@ export class Runner extends Test {
         }
     }
 
+    /**
+     * Feeds the tick provider with the ticks the chart is configured to use.
+     *
+     * When the chart has a tick source, every CSV file stored in its OPFS folder is parsed by
+     * `Tester.FeedTickProviderCsv()`. Otherwise the wasm module generates randomized ticks, so a
+     * chart still renders before any tick data has been uploaded.
+     */
+    private async feedTicks(lib: LibModule, ticker: Indi_TickProvider, path?: string): Promise<void> {
+        const files = path ? await this.listTickFiles(path) : [];
+
+        if (files.length === 0) {
+            lib.Tester.FeedTickProvider(ticker, 1000);
+
+            return;
+        }
+
+        for (const file of files) {
+            lib.Tester.FeedTickProviderCsv(ticker, await file.file.text());
+        }
+    }
+
+    /**
+     * Lists the CSV files of a tick source folder, sorted by name.
+     *
+     * The upload panel stores one file per hour, so sorting by name feeds the ticks in
+     * chronological order.
+     */
+    private async listTickFiles(path: string): Promise<OPFSFile[]> {
+        try {
+            const files = await opfs.listFiles(path);
+
+            return files
+                .filter(file => file.extension.toLowerCase() === 'csv')
+                .sort((a, b) => a.name.localeCompare(b.name));
+        }
+        catch (error) {
+            if (error instanceof NotFound) {
+                console.warn(`Tick source folder "${path}" does not exist, falling back to randomized ticks.`);
+
+                return [];
+            }
+
+            throw error;
+        }
+    }
+
     public async test() {
+        this.pendingRun = undefined;
+
         await run(Runner, createModule, 'node_modules/fx31337-wasm/dist/IndicatorTest.wasm', this);
+        await this.pendingRun;
     }
 }

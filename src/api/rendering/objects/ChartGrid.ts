@@ -1,5 +1,5 @@
 import * as Gfx from 'three';
-import { type Chart } from './Chart';
+import { Chart } from './Chart';
 import { RendererRenderPass } from './../../rendering/RendererRenderPass';
 import { Renderer } from './../Renderer';
 
@@ -158,7 +158,58 @@ export class ChartGrid extends Gfx.Object3D
     private positionLastPriceHover = (event: MouseEvent): void => {
         this.domLastPriceHover.style.left = `${event.pageX + 10}px`;
         this.domLastPriceHover.style.top = `${event.pageY + 10}px`;
+
+        if (this.lastPriceLabelHovered)
+            this.updateLastPriceHoverContent(event.clientY);
     };
+
+    /**
+     * Whether the mouse is currently over one of the last-price labels.
+     */
+    private lastPriceLabelHovered: boolean = false;
+
+    /**
+     * Lists every last-price line whose label is within reach of the mouse's vertical position, nearest first.
+     */
+    private updateLastPriceHoverContent(mouseY: number): void {
+        const lines = this.chart.lastPriceLines;
+        const reach = 16;
+        const nearby: { distance: number; html: string }[] = [];
+
+        for (let i = 0; i < lines.length; i++) {
+            const label = this.labelsLastPriceDOM.children[i] as HTMLDivElement | undefined;
+
+            if (!label || label.style.display === 'none')
+                continue;
+
+            const rect = label.getBoundingClientRect();
+            const distance = Math.abs((rect.top + rect.bottom) / 2 - mouseY);
+
+            if (distance > reach)
+                continue;
+
+            const line = lines[i];
+            const color = `#${line.color.toString(16).padStart(6, '0')}`;
+            const value = line.value.toFixed(this.chart.priceDigits);
+
+            // Same layout as the chart's bar tooltip: colored indicator name, then the bolded
+            // value title followed by the value (e.g. "OHLC: Close 1.09772").
+            const name = Chart.stripIndicatorIndex(line.name) || 'Series';
+            const valueHtml = line.valueTitle
+                ? `<b>${ChartGrid.escapeHtml(line.valueTitle)}</b> ${value}`
+                : value;
+
+            nearby.push({
+                distance,
+                html: `<span style="color:${color}">${ChartGrid.escapeHtml(name)}</span>: ${valueHtml}`,
+            });
+        }
+
+        nearby.sort((a, b) => a.distance - b.distance);
+
+        this.domLastPriceHover.innerHTML = nearby.map(entry => entry.html).join('<br>');
+        this.domLastPriceHover.style.display = nearby.length > 0 ? 'block' : 'none';
+    }
 
     /**
      * Construtor.
@@ -250,8 +301,10 @@ export class ChartGrid extends Gfx.Object3D
 
         // One extra horizontal line per price indicator, marking its last value.
         for (const line of lastPriceLines) {
-            arr[idx++] = bbox.min.x; arr[idx++] = line.worldY; arr[idx++] = 0;
-            arr[idx++] = bbox.max.x; arr[idx++] = line.worldY; arr[idx++] = 0;
+            // Clamped so a line scrolled out of the chart stays on its border instead of leaving it.
+            const y = Math.max(bbox.min.y, Math.min(bbox.max.y, line.worldY));
+            arr[idx++] = bbox.min.x; arr[idx++] = y; arr[idx++] = 0;
+            arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = 0;
         }
 
         // Border edges: top, bottom, left and right.
@@ -409,11 +462,15 @@ export class ChartGrid extends Gfx.Object3D
         return ChartGrid.formatDate(bar.time_ms);
     }
 
+    private static escapeHtml(text: string): string {
+        return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
     /**
      * Formats a timestamp (in milliseconds) as "D Mon YYYY", e.g. "2 May 2024".
      */
     private static formatDate(timeMs: number): string {
-        const date = new Date(timeMs);
+        const date = new Date(timeMs - 60 * 60 * 1000);
         const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
         // Returning date and time.
@@ -508,6 +565,9 @@ export class ChartGrid extends Gfx.Object3D
             this.setLabelStyle(label, 'horizontal-right');
             label.style.pointerEvents = 'auto';
             label.style.cursor = 'default';
+            label.style.width = 'auto';
+            label.style.padding = '0 4px';
+            label.style.background = '#000';
             this.labelsLastPriceDOM.appendChild(label);
         }
 
@@ -657,7 +717,23 @@ export class ChartGrid extends Gfx.Object3D
             }
         }
 
+        // Labels without a line this frame would otherwise keep their stale position and opacity.
+        for (let i = verticalLinePositions.length; i < this.labelsVerticalLinesBottomDOM.childElementCount; i++) {
+            this.applyLabelState(this.labelsVerticalLinesBottomDOM.children[i] as HTMLDivElement, 0, 0, 0, false);
+        }
+
         this.updateLastPriceLabels(bbox, clientWidth, clientHeight);
+    }
+
+    /**
+     * Removes the DOM labels and tooltip owned by the grid. Must be called when the chart leaves the scene.
+     */
+    public dispose(): void {
+        this.labelsDOM.remove();
+        this.domLastPriceHover.remove();
+        document.removeEventListener('mousemove', this.positionLastPriceHover);
+        this.lastPriceHoverAttached = false;
+        this.lastPriceLabelHovered = false;
     }
 
     /**
@@ -684,13 +760,14 @@ export class ChartGrid extends Gfx.Object3D
 
             const line = lastPriceLines[i];
 
-            // The label follows the line, which is fixed in world space (it does not scroll).
+            // The label follows the line, which includes the vertical scroll.
             this._tempVector.set(bbox.max.x, line.worldY, 0);
             this._tempVector.applyMatrix4(this.chart.matrixWorld);
             this._tempVector.project(RendererRenderPass.Current!.camera!.native);
 
-            const visible = this._tempVector.z <= 1;
-            const text = line.value.toFixed(this.chart.priceDigits);
+            const visible = this._tempVector.z <= 1 && line.worldY >= bbox.min.y && line.worldY <= bbox.max.y;
+            const colorCss = `#${line.color.toString(16).padStart(6, '0')}`;
+            const text = `<span style="color:${colorCss}">${ChartGrid.escapeHtml(line.name)}</span>&nbsp;${line.value.toFixed(this.chart.priceDigits)}`;
 
             if (visible) {
                 const screenX = (this._tempVector.x + 1) * 0.5 * clientWidth;
@@ -703,8 +780,6 @@ export class ChartGrid extends Gfx.Object3D
             }
 
             // Color the label like its indicator so it can be told apart from the grid labels.
-            const colorCss = `#${line.color.toString(16).padStart(6, '0')}`;
-
             if (label.dataset.color !== colorCss) {
                 label.style.color = colorCss;
                 label.dataset.color = colorCss;
@@ -715,18 +790,13 @@ export class ChartGrid extends Gfx.Object3D
             if (label.dataset.hoverBound !== '1') {
                 label.dataset.hoverBound = '1';
 
-                label.addEventListener('mouseenter', () => {
-                    const current = this.chart.lastPriceLines[Number(label.dataset.lineIndex ?? -1)];
-
-                    if (!current)
-                        return;
-
-                    this.domLastPriceHover.innerHTML =
-                        `Indicator: ${current.name}<br>Last value: ${current.value.toFixed(this.chart.priceDigits)}`;
-                    this.domLastPriceHover.style.display = 'block';
+                label.addEventListener('mouseenter', (event: MouseEvent) => {
+                    this.lastPriceLabelHovered = true;
+                    this.updateLastPriceHoverContent(event.clientY);
                 });
 
                 label.addEventListener('mouseleave', () => {
+                    this.lastPriceLabelHovered = false;
                     this.domLastPriceHover.style.display = 'none';
                 });
             }

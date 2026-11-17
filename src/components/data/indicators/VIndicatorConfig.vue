@@ -7,6 +7,15 @@
                 <ElSelect v-if="field.options" v-model="roamingState.config[field.key]" :label="field.label">
                     <ElOption v-for="option in field.options" :key="option.value" :label="option.label" :value="option.value" />
                 </ElSelect>
+                <ElInputNumber
+                    v-else-if="field.percent"
+                    v-model="roamingState.config[field.key]"
+                    :min="0"
+                    :max="100"
+                    :step="1"
+                    :precision="2"
+                    :label="field.label"
+                />
                 <ElInputNumber v-else v-model="roamingState.config[field.key]" :min="field.min" :label="field.label" />
             </div>
         </div>
@@ -21,6 +30,8 @@
         label: string;
         min?: number;
         options?: { label: string; value: string }[];
+        /** Value is a percentage, so the widget is limited to 0..100. */
+        percent?: boolean;
     };
 
     @Component({
@@ -99,7 +110,7 @@
                         { key: 'ma_shift', label: 'MA Shift', min: 0 },
                         { key: 'ma_method', label: 'MA Method', options: maMethod },
                         { key: 'applied_price', label: 'Applied Price', options: appliedPrice },
-                        { key: 'deviation', label: 'Deviation', min: 0 },
+                        { key: 'deviation', label: 'Deviation (%)', percent: true },
                         shift
                     ];
                 case 'Pivot':

@@ -3,7 +3,10 @@
 <template>
 
     <div class="col relative h-full">
-        <div ref="canvas" class="absolute top-0 left-0 w-full h-full canvas" @contextmenu.prevent></div>
+        <div ref="canvas" class="absolute top-0 left-0 w-full h-full canvas" :class="{ 'is-blurred': loading }" @contextmenu.prevent></div>
+        <div v-if="loading" class="canvas-loading" role="status" aria-label="Running chart">
+            <span class="canvas-loading-spinner"></span>
+        </div>
         <!--
             <div class="attributes absolute top-0 right-0 w-[200px] h-full text-white p-3 pt-10">
             </div>
@@ -36,6 +39,17 @@
     //import { ChartGridLabelsPlugin } from '../../api/rendering/plugins/chart/ChartGridLabelsPlugin';
     import { Chart } from '../../api/rendering/objects/Chart';
     import { Series } from '../../api/rendering/objects/Series';
+    import { Prop, Watch } from 'vue-facing-decorator';
+
+    // Capture-phase guard so the camera and hover plugins never see input while a chart is running.
+    const blockedEvents = ['keydown', 'keyup', 'mousemove'] as const;
+
+    function blockCanvasInput(e: Event): void {
+        if ((e.target as HTMLElement | null)?.closest?.('input, textarea, [contenteditable]'))
+            return;
+
+        e.stopImmediatePropagation();
+    }
 
     
     @Component({
@@ -45,6 +59,19 @@
         expose: ['scene', 'renderer'],
     })
     export class VCanvas3D extends Vue {
+
+        @Prop({ type: Boolean, default: false })
+        loading!: boolean;
+
+        @Watch('loading')
+        onLoadingChanged(loading: boolean): void {
+            for (const type of blockedEvents) {
+                if (loading)
+                    window.addEventListener(type, blockCanvasInput, true);
+                else
+                    window.removeEventListener(type, blockCanvasInput, true);
+            }
+        }
 
         @Ref
         canvas!: HTMLDivElement
@@ -242,6 +269,30 @@
         flex: 1;
         background: #000;
         overflow: hidden;
+        transition: filter 0.15s ease;
+
+        &.is-blurred {
+            filter: blur(4px);
+        }
+    }
+
+    .canvas-loading {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: auto;
+        z-index: 1;
+    }
+
+    .canvas-loading-spinner {
+        width: 40px;
+        height: 40px;
+        border: 4px solid rgba(255, 255, 255, 0.25);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: canvas-loading-spin 0.8s linear infinite;
     }
 
     .attributes {
@@ -260,6 +311,14 @@
 </style>
 
 <style>
+    @keyframes canvas-loading-spin {
+        to {
+            transform: rotate(360deg);
+        }
+    }
+</style>
+
+<style>
 
     canvas {
         width: 100% !important;
@@ -268,13 +327,24 @@
 
     .chart-tooltip {
         position: absolute;
-        padding: 4px;
-        background: rgba(0, 0, 0, 0.8);
+        padding: 4px 6px;
+        background: #000;
         font-size: 12px;
         color: #fff;
+        border: 1px solid #555;
         border-radius: 5px;
         pointer-events: none;
         z-index: 1000;
+        /* One indicator per line, never wrapped — the tooltip lists every indicator's values. */
+        white-space: nowrap;
+        line-height: 1.45;
+    }
+
+    /* Horizontal rule between the tooltip's timestamp header and the indicator values. */
+    .chart-tooltip-separator {
+        height: 1px;
+        margin: 3px 0;
+        background: #555;
     }
 
 </style>

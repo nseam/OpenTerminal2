@@ -2,6 +2,7 @@ import { RendererPlugin }          from "../RendererPlugin";
 import { Known }                   from "@shared/api/Known";
 import type { RendererRenderPass } from "../RendererRenderPass";
 import * as Gfx from 'three';
+import { isUiBlockingInput } from "../isUiBlockingInput";
 
 // Options for the CameraMovement plugin.
 export interface CameraMovementOptions {
@@ -58,6 +59,7 @@ export class CameraMovement extends RendererPlugin<CameraMovementOptions>
         window.addEventListener('keydown', this.handleKeyDown.bind(this));
         window.addEventListener('keyup', this.handleKeyUp.bind(this));
         canvas.addEventListener('mousedown', this.handleMouseDown.bind(this));
+        canvas.addEventListener('mousedown', () => (document.activeElement as HTMLElement | null)?.blur());
         window.addEventListener('mousemove', this.handleMouseMove.bind(this));
         window.addEventListener('mouseup', this.handleMouseUp.bind(this));
         window.addEventListener('blur', this.handleBlur.bind(this));
@@ -132,6 +134,9 @@ export class CameraMovement extends RendererPlugin<CameraMovementOptions>
      * @param e The keyboard event.
      */
     private handleKeyDown(e: KeyboardEvent): void {
+        if (isUiBlockingInput())
+            return;
+
         this.keysPressed[e.key.toLowerCase()] = true;
     }
 

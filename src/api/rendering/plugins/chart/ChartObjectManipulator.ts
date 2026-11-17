@@ -5,6 +5,7 @@ import * as Gfx from 'three';
 import { ObjectPicker } from "../ObjectPicker";
 import { Series } from "../../objects/Series";
 import { Chart } from "../../objects/Chart";
+import { isUiBlockingInput } from "../../isUiBlockingInput";
 
 type ChartHit = {
     series: Series;
@@ -59,9 +60,25 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
 
     private _chartPickObjects: Gfx.Object3D[] = [];
 
-    private _hoveredTarget: ChartHit | null = null;
-
     private _selectedTarget: ChartHit | null = null;
+
+    /** Raycaster used to find the world-space X of the cursor when no bar is picked directly. */
+    private _hoverRaycaster: Gfx.Raycaster = new Gfx.Raycaster();
+
+    /** The chart plane the cursor ray is intersected with, rebuilt from the chart's world matrix. */
+    private _hoverPlane: Gfx.Plane = new Gfx.Plane(new Gfx.Vector3(0, 0, 1), 0);
+
+    /** Scratch normal used when rebuilding `_hoverPlane`. */
+    private _hoverPlaneNormal: Gfx.Vector3 = new Gfx.Vector3();
+
+    /** Scratch point used when rebuilding `_hoverPlane`. */
+    private _hoverPlanePoint: Gfx.Vector3 = new Gfx.Vector3();
+
+    /** Scratch vector reused for the ray/plane intersection. */
+    private _hoverIntersection: Gfx.Vector3 = new Gfx.Vector3();
+
+    /** Scratch vector reused for the chart-local cursor position. */
+    private _hoverLocal: Gfx.Vector3 = new Gfx.Vector3();
 
     // Global bar index (barsStartIndex + series-local index) of the selected bar, or -1 if none.
     private _selectedGlobalBarIndex: number = -1;
@@ -77,11 +94,14 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     }
 
     public setCurrentChart(chart: Chart): void {
+        // The previous chart must not keep reporting a hovered bar once it is no longer current.
+        this.options.chart?.setHoveredBarIndex(-1);
+
         this.options.chart = chart;
 
         if (this.options.chart) {
             this.options.chart.onDataSet = () => {
-                this.options.chart.numBarsVisible = this.options.chart.numInitialBars
+                this.options.chart.numBarsVisible = Math.floor(this.options.chart.numInitialBars / this.options.chart.zoom);
                 this.centerCameraOnChart();
             }
         }
@@ -97,6 +117,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         window.addEventListener('mousemove', this.handleMouseMove.bind(this));
         window.addEventListener('mouseup', this.handleMouseUp.bind(this));
         window.addEventListener('blur', this.handleBlur.bind(this));
+        canvas.addEventListener('mouseleave', this.handleMouseLeave.bind(this));
         canvas.addEventListener('wheel', this.handleWheel.bind(this), { passive: false });
     }
 
@@ -110,6 +131,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         window.removeEventListener('mousemove', this.handleMouseMove);
         window.removeEventListener('mouseup', this.handleMouseUp);
         window.removeEventListener('blur', this.handleBlur);
+        canvas.removeEventListener('mouseleave', this.handleMouseLeave);
         canvas.removeEventListener('wheel', this.handleWheel);
     }
 
@@ -182,25 +204,70 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         }
     }
 
-    /** Clears the previously hovered chart target. */
+    /**
+     * Clears the hovered column of every series of the current chart.
+     *
+     * Hover is chart-wide (see `Chart.setHoveredBarIndex`), so every series has to be reset rather
+     * than only the one that was picked last.
+     */
     private resetHoverStates(): void {
-        const previous = this._hoveredTarget;
-        this._hoveredTarget = null;
-        if (!previous)
+        const chart = this.options.chart;
+
+        if (!chart)
             return;
 
-        if (previous.target.kind === 'bar') {
-            const bar = previous.series.bars[previous.target.barIndex];
-            if (bar) {
-                bar.hovered = false;
-                previous.series.updateBarColor(previous.target.barIndex);
-            }
-        } else {
-            const bar = previous.series.bars[previous.target.barIndex];
-            if (bar)
-                bar.hovered = false;
-            previous.series.setHoveredValue(-1, -1);
-        }
+        for (const series of chart.series)
+            series.setHoveredValue(-1, -1);
+    }
+
+    /**
+     * Finds the bar column under the cursor, regardless of whether the cursor is exactly on a
+     * drawn bar or value point.
+     *
+     * The cursor ray is intersected with the chart's plane and the resulting X position is mapped
+     * back onto the bar layout, so hovering anywhere over the chart resolves to the nearest bar.
+     * This is what lets a single hover report the values of every indicator at that bar.
+     *
+     * @returns The bar index within the visible window, or -1 when the cursor is outside the chart.
+     */
+    private findNearestBarIndex(viewportPosition: Gfx.Vector2): number {
+        const chart = this.options?.chart;
+        const camera = this.camera;
+
+        if (!chart || !camera || chart.series.length === 0)
+            return -1;
+
+        // The chart is flat, so the cursor ray is intersected with the chart's own plane. Deriving
+        // the plane from the chart's world matrix keeps this correct if the chart is ever moved or
+        // rotated in the scene. The matrix is refreshed by the render loop every frame.
+        this._hoverPlaneNormal.set(0, 0, 1).transformDirection(chart.matrixWorld);
+        this._hoverPlanePoint.set(0, 0, 0).applyMatrix4(chart.matrixWorld);
+        this._hoverPlane.setFromNormalAndCoplanarPoint(this._hoverPlaneNormal, this._hoverPlanePoint);
+
+        this._hoverRaycaster.setFromCamera(viewportPosition, camera.native);
+
+        if (!this._hoverRaycaster.ray.intersectPlane(this._hoverPlane, this._hoverIntersection))
+            return -1;
+
+        // The chart may be transformed, so the intersection is converted into chart-local space.
+        this._hoverLocal.copy(this._hoverIntersection);
+        chart.worldToLocal(this._hoverLocal);
+
+        const bbox = chart.getBBox();
+
+        if (this._hoverLocal.x < bbox.min.x || this._hoverLocal.x > bbox.max.x ||
+            this._hoverLocal.y < bbox.min.y || this._hoverLocal.y > bbox.max.y)
+            return -1;
+
+        const step = (chart.barWidth + chart.barSpacing) * chart.zoom;
+
+        if (!Number.isFinite(step) || step <= 0)
+            return -1;
+
+        // Bars are laid out at (index + 1) * step in series-local space (see Series.layoutBars()).
+        const index = Math.round((this._hoverLocal.x - chart.series[0].position.x) / step) - 1;
+
+        return index >= 0 && index < chart.numBarsVisible ? index : -1;
     }
 
     /**
@@ -265,6 +332,9 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      * @param e The keyboard event.
      */
     private handleKeyDown(e: KeyboardEvent): void {
+        if (isUiBlockingInput())
+            return;
+
         this.keysPressed[e.key.toLowerCase()] = true;
 
         if (!this.options.chart)
@@ -283,7 +353,7 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
             const newZoom = this.options.chart.zoom * zoomFactor;
 
             // Zoom could be clamped to a reasonable range if desired, e.g.:
-            this.options.chart.zoom = Math.max(1 / 256, Math.min(newZoom, 1));
+            this.options.chart.zoom = Math.max(1 / 256, Math.min(newZoom, 4));
         }
         else if (e.key === '0') {
             this.options.chart.zoom = 1;
@@ -317,6 +387,10 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         this.isAltPressed = false;
         this.isShiftPressed = false;
         this.isPanning = false;
+
+        // The window lost focus, so no bar is hovered any more.
+        this.resetHoverStates();
+        this.options.chart?.setHoveredBarIndex(-1);
     }
 
     /**
@@ -392,23 +466,28 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
             this._restoreSelection();
         }
         else if (objectPicker) {
-            this.resetHoverStates();
+            const chart = this.options.chart;
 
-            if (!this.options.chart)
+            if (!chart)
                 return;
 
             const hit = this.findChartHit(objectPicker, viewportPosition);
-            if (hit?.target.kind === 'bar') {
-                hit.series.bars[hit.target.barIndex].hovered = true;
-                hit.series.updateBarColor(hit.target.barIndex);
-                this._hoveredTarget = hit;
-            } else if (hit?.target.kind === 'point') {
-                const bar = hit.series.bars[hit.target.barIndex];
-                if (bar)
-                    bar.hovered = true;
-                hit.series.setHoveredValue(hit.target.barIndex, hit.target.valueIndex);
-                this._hoveredTarget = hit;
-            }
+
+            // The hovered bar is resolved from the cursor's position over the chart rather than
+            // from the picked geometry, so hovering anywhere in a bar column reports every
+            // indicator's value at that bar — not just the series under the cursor. The picked
+            // bar is only a fallback for cursors just outside the chart's bounds.
+            const nearestBarIndex = this.findNearestBarIndex(viewportPosition);
+            const hoveredBarIndex = nearestBarIndex >= 0 ? nearestBarIndex : (hit?.target.barIndex ?? -1);
+
+            chart.setHoveredBarIndex(hoveredBarIndex);
+
+            // Every visible series marks the hovered column, so all indicators are highlighted
+            // from top to bottom instead of only the line nearest the cursor. Passing -1 as the
+            // value channel marks the whole column. Hidden series are cleared so they do not
+            // reappear with a stale marker once they are shown again.
+            for (const series of chart.series)
+                series.setHoveredValue(series.visible ? hoveredBarIndex : -1, -1);
         }
     }
 
@@ -421,6 +500,15 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         this.isDragging = false;
         this.isAltPressed = false;
         this.isScrolling = false;
+    }
+
+    /**
+     * Clears the hover state when the cursor leaves the canvas, so the tooltip and the bar
+     * highlight do not linger over a chart the mouse is no longer over.
+     */
+    private handleMouseLeave(): void {
+        this.resetHoverStates();
+        this.options.chart?.setHoveredBarIndex(-1);
     }
 
     /**

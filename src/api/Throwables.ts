@@ -97,3 +97,15 @@ export class ConnectionError extends Throwable {
         super({ ...details, message: `Connection error` });
     }
 }
+
+export class QuotaExceeded extends Throwable {
+    constructor(details: Partial<ThrowableDetails> = { message: '' }) {
+        super({ ...details, message: `Storage quota exceeded` });
+    }
+}
+
+export class InvalidPath extends Throwable {
+    constructor(details: Partial<ThrowableDetails> = { message: '' }) {
+        super({ ...details, message: `Invalid path` });
+    }
+}
