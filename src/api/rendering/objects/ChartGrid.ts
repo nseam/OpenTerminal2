@@ -62,33 +62,84 @@ export class ChartGrid extends Gfx.Object3D
     private lastUpdatedFrameId: number = -1;
 
     /**
-     * Returns the world-space X positions of the vertical grid lines.
+     * Time steps (ms) a vertical line may be spaced by, ascending. Steps below 5 minutes are never
+     * used, so an M1 chart gets lines every 5 minutes.
+     */
+    private static readonly TIME_STEPS_MS: number[] = [
+        5, 10, 15, 30, 60, 120, 180, 240, 360, 720, 1440, 2880, 10080, 20160, 43200, 129600, 262800, 525600,
+    ].map(minutes => minutes * 60_000);
+
+    /**
+     * Returns the vertical grid lines: their world-space X position and the time they mark.
      *
-     * Lines are spaced `verticalGridLineDistance` apart and scroll with `scrollX`. The first line
-     * is always within one spacing of the left edge (so it is never missing), and no line is ever
-     * placed outside the chart.
+     * Lines sit on round times (e.g. 00:00, 00:05, ...), using the smallest step that is not
+     * shorter than a bar and keeps the visible line count within `maxVerticalLines`. A line may
+     * fall between bars, or before the first bar. Lines outside the chart are dropped.
      *
      * Both the rendered lines and their labels use this, so they cannot drift apart.
      */
-    public getVerticalLinePositions(): number[] {
-        const bbox = this.chart.getBBox();
-        const spacing = this.chart.verticalGridLineDistance;
+    public getVerticalLinePositions(): { x: number; timeMs: number }[] {
+        const chart = this.chart;
+        const bbox = chart.getBBox();
+        const wpb = chart.worldPerBar;
+        const barMs = chart.barDurationMs;
 
-        if (!Number.isFinite(spacing) || spacing <= 0)
+        if (!Number.isFinite(wpb) || wpb <= 0 || barMs <= 0)
             return [];
 
-        // Offset of the first line from the left edge, in [0, spacing).
-        const shift = ((this.chart.scrollX % spacing) + spacing) % spacing;
-        const firstX = bbox.min.x + (spacing - shift) % spacing;
+        const left = bbox.min.x;
+        const origin = -chart.chartWidth / 2 - chart.scrollX;
+
+        // Bar `f` (fractional dataset index) is drawn at `origin + (f + 1) * wpb`.
+        const indexAtX = (x: number): number => (x - origin) / wpb - 1;
+        const xAtIndex = (index: number): number => origin + (index + 1) * wpb;
+
+        const tMin = chart.timeAtFractionalIndex(indexAtX(left));
+        const tMax = chart.timeAtFractionalIndex(indexAtX(bbox.max.x));
+
+        if (tMin === null || tMax === null)
+            return [];
+
+        let step = ChartGrid.TIME_STEPS_MS[ChartGrid.TIME_STEPS_MS.length - 1];
+
+        for (const candidate of ChartGrid.TIME_STEPS_MS) {
+            if (candidate < barMs)
+                continue;
+
+            const tooMany = (tMax - tMin) / candidate > chart.maxVerticalLines;
+            const tooClose = candidate / barMs * wpb < chart.minVerticalLineDistance;
+
+            if (!tooMany && !tooClose) {
+                step = candidate;
+                break;
+            }
+        }
+
+        // Labels show local wall-clock time shifted by -1h (see formatDate), so round in that space.
+        // Weeks start on Monday; the epoch (a Thursday) is 4 days earlier.
+        const shift = -3_600_000 - new Date(tMin).getTimezoneOffset() * 60_000;
+        const weekOffset = step % (7 * 86_400_000) === 0 ? 4 * 86_400_000 : 0;
+        const toWall = (t: number): number => t + shift - weekOffset;
+
+        const first = Math.ceil(toWall(tMin) / step);
+        const last = Math.floor(toWall(tMax) / step);
+        const lines: { x: number; timeMs: number }[] = [];
 
         // One extra slot covers the case where a line lands exactly on the right edge.
-        const maxLines = this.chart.numVerticalLines + 1;
-        const positions: number[] = [];
+        for (let k = first; k <= last && lines.length < chart.maxVerticalLines + 1; k++) {
+            const timeMs = k * step - shift + weekOffset;
+            const index = chart.fractionalIndexAtTime(timeMs);
 
-        for (let x = firstX; x <= bbox.max.x + 1e-9 && positions.length < maxLines; x += spacing)
-            positions.push(x);
+            if (index === null)
+                continue;
 
-        return positions;
+            const x = xAtIndex(index);
+
+            if (x >= left - 1e-9 && x <= bbox.max.x + 1e-9)
+                lines.push({ x, timeMs });
+        }
+
+        return lines;
     }
 
     /**
@@ -114,6 +165,9 @@ export class ChartGrid extends Gfx.Object3D
                 }
             `,
             transparent: true,
+            // The grid is transparent and sits behind the series, so it must not write depth —
+            // otherwise it would occlude the bars and lines drawn after it.
+            depthWrite: false,
         })
     );
 
@@ -194,7 +248,7 @@ export class ChartGrid extends Gfx.Object3D
 
             // Same layout as the chart's bar tooltip: colored indicator name, then the bolded
             // value title followed by the value (e.g. "OHLC: Close 1.09772").
-            const name = Chart.stripIndicatorIndex(line.name) || 'Series';
+            const name = this.chart.getIndicatorDisplayName(line.name) || 'Series';
             const valueHtml = line.valueTitle
                 ? `<b>${ChartGrid.escapeHtml(line.valueTitle)}</b> ${value}`
                 : value;
@@ -291,10 +345,8 @@ export class ChartGrid extends Gfx.Object3D
             arr[idx++] = bbox.max.x; arr[idx++] = y; arr[idx++] = 0;
         }
 
-        // Vertical lines, scrolled horizontally. Only every `verticalLineStride`-th bar gets a line,
-        // so the spacing is `verticalGridLineDistance`. Positions are clamped to the chart, so no
-        // line is ever drawn outside of it.
-        for (const x of verticalLinePositions) {
+        // Vertical lines, scrolled horizontally, placed on round times. None is outside the chart.
+        for (const { x } of verticalLinePositions) {
             arr[idx++] = x; arr[idx++] = bbox.min.y; arr[idx++] = 0;
             arr[idx++] = x; arr[idx++] = bbox.max.y; arr[idx++] = 0;
         }
@@ -439,29 +491,6 @@ export class ChartGrid extends Gfx.Object3D
             state.text = text;
         }
     }
-
-    /**
-     * Finds the bar in the first series closest to the given world-space X position and
-     * returns its date formatted as "D Mon YYYY", or an empty string if there's no data.
-     */
-    private getNearestBarDateLabel(worldX: number): string {
-        const series = this.chart.series[0];
-
-        if (!series || series.bars.length === 0)
-            return '';
-
-        const barSpacingWorld = (this.chart.barWidth + this.chart.barSpacing) * this.chart.zoom;
-        let barIndex = Math.round((worldX - series.position.x) / barSpacingWorld) - 1;
-        barIndex = Math.max(0, Math.min(series.bars.length - 1, barIndex));
-
-        const bar = series.bars[barIndex];
-
-        if (!bar || bar.time_ms === 0)
-            return '';
-
-        return ChartGrid.formatDate(bar.time_ms);
-    }
-
     private static escapeHtml(text: string): string {
         return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
@@ -540,7 +569,7 @@ export class ChartGrid extends Gfx.Object3D
 
         // Ensuring capacity for the vertical line labels at the bottom of the chart.
         // One extra label covers the case where a line lands exactly on the right edge.
-        const numVerticalLabels = this.chart.numVerticalLines + 1;
+        const numVerticalLabels = this.chart.maxVerticalLines + 1;
 
         for (let i = this.labelsVerticalLinesBottomDOM.childElementCount; i < numVerticalLabels; i++) {
             const label = document.createElement('div');
@@ -693,13 +722,13 @@ export class ChartGrid extends Gfx.Object3D
             if (!label)
                 continue;
 
-            const effectiveX = verticalLinePositions[i];
+            const effectiveX = verticalLinePositions[i].x;
 
             // Fade out the label as it approaches the left or right edge of the chart, same as the grid lines.
             const distToEdgeX = Math.min(effectiveX - bbox.min.x, bbox.max.x - effectiveX);
             const labelAlpha = this.computeEdgeFadeAlphaLabels(distToEdgeX, this.chart.initialVerticalLineDistance);
 
-            const dateText = this.getNearestBarDateLabel(effectiveX);
+            const dateText = ChartGrid.formatDate(verticalLinePositions[i].timeMs);
 
             this._tempVector.set(effectiveX, bbox.min.y, 0);
             this._tempVector.applyMatrix4(this.chart.matrixWorld);
@@ -767,13 +796,15 @@ export class ChartGrid extends Gfx.Object3D
 
             const visible = this._tempVector.z <= 1 && line.worldY >= bbox.min.y && line.worldY <= bbox.max.y;
             const colorCss = `#${line.color.toString(16).padStart(6, '0')}`;
-            const text = `<span style="color:${colorCss}">${ChartGrid.escapeHtml(line.name)}</span>&nbsp;${line.value.toFixed(this.chart.priceDigits)}`;
+            const text = `<span style="color:${colorCss}">${ChartGrid.escapeHtml(this.chart.getIndicatorDisplayName(line.name))}</span>&nbsp;${line.value.toFixed(this.chart.priceDigits)}`;
 
             if (visible) {
                 const screenX = (this._tempVector.x + 1) * 0.5 * clientWidth;
                 const screenY = (1 - this._tempVector.y) * 0.5 * clientHeight;
 
-                this.applyLabelState(label, screenX, screenY, 1, true, text);
+                // The label fades together with its line, so a dimmed indicator's label does not
+                // stay fully opaque while its line fades away.
+                this.applyLabelState(label, screenX, screenY, line.dimFactor, true, text);
             }
             else {
                 this.applyLabelState(label, 0, 0, 0, false, text);
@@ -869,9 +900,12 @@ export class ChartGrid extends Gfx.Object3D
             const lr = ((color >> 16) & 0xff) / 0xff;
             const lg = ((color >> 8) & 0xff) / 0xff;
             const lb = (color & 0xff) / 0xff;
+            // Dimmed together with the series it belongs to, so hovering another indicator's
+            // settings fades this line as well.
+            const la = lastPriceLines[i].dimFactor;
 
-            col[vi * 4]     = lr; col[vi * 4 + 1]     = lg; col[vi * 4 + 2]     = lb; col[vi * 4 + 3]     = 1.0;
-            col[(vi+1) * 4] = lr; col[(vi+1) * 4 + 1] = lg; col[(vi+1) * 4 + 2] = lb; col[(vi+1) * 4 + 3] = 1.0;
+            col[vi * 4]     = lr; col[vi * 4 + 1]     = lg; col[vi * 4 + 2]     = lb; col[vi * 4 + 3]     = la;
+            col[(vi+1) * 4] = lr; col[(vi+1) * 4 + 1] = lg; col[(vi+1) * 4 + 2] = lb; col[(vi+1) * 4 + 3] = la;
         }
 
         this.gfxColorBuffer.needsUpdate = true;

@@ -37,6 +37,33 @@ export class Renderer
     // Container where the renderer's canvas will be appended.
     public container: HTMLDivElement | undefined;
 
+    // Container the pointer-over listeners are currently attached to.
+    private pointerTrackingContainer: HTMLDivElement | undefined;
+
+    // Whether the mouse pointer is currently over the renderer's container.
+    private _isPointerOver: boolean = false;
+
+    /**
+     * Whether the mouse pointer is currently over the renderer's container.
+     *
+     * Plugins use this to ignore mouse input that happens outside the canvas — e.g. while the
+     * cursor is over the side panel — so orbiting, panning, zooming, scrolling and hovering only
+     * react while the pointer is actually over the canvas.
+     */
+    public get isPointerOver(): boolean {
+        return this._isPointerOver;
+    }
+
+    /** Marks the pointer as being over the container. */
+    private handlePointerEnter = (): void => {
+        this._isPointerOver = true;
+    };
+
+    /** Marks the pointer as having left the container. */
+    private handlePointerLeave = (): void => {
+        this._isPointerOver = false;
+    };
+
     /**
      * Custom renderer class that extends THREE.WebGLRenderer
      */
@@ -160,6 +187,23 @@ export class Renderer
         this.native.domElement.style.height = '100%';
 
         this.container = container;
+
+        // Track whether the pointer is over the canvas so plugins can ignore input that happens
+        // elsewhere in the page. `pointerenter`/`pointerleave` do not bubble, but they do fire for
+        // the container when the pointer enters or leaves any of its descendants.
+        if (this.pointerTrackingContainer !== container)
+        {
+            this.pointerTrackingContainer?.removeEventListener('pointerenter', this.handlePointerEnter);
+            this.pointerTrackingContainer?.removeEventListener('pointerleave', this.handlePointerLeave);
+
+            container.addEventListener('pointerenter', this.handlePointerEnter);
+            container.addEventListener('pointerleave', this.handlePointerLeave);
+
+            this.pointerTrackingContainer = container;
+
+            // The pointer may already be over the container when it is first attached.
+            this._isPointerOver = container.matches(':hover');
+        }
     }
 
     /**

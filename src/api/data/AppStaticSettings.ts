@@ -36,7 +36,7 @@ export const AppStaticSettings = {
             shift: 0
         },
         // MT4/MT5: single buffer, "RSI".
-        valueTitles: ['RSI'],
+        valueTitles: [],
     },
     {
         typeId: 'MA',

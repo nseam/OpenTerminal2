@@ -24,6 +24,11 @@ export interface ChartLastPriceLine {
     worldY: number;
     /** Line color as 0xRRGGBB. */
     color: number;
+    /**
+     * How strongly the line is dimmed, 0..1. Mirrors `Series.dimFactor`, so the line fades together
+     * with the series it belongs to.
+     */
+    dimFactor: number;
 }
 
 export class Chart extends Gfx.Object3D
@@ -90,63 +95,13 @@ export class Chart extends Gfx.Object3D
      * Maximum number of vertical grid lines (and their labels) drawn on the chart. The actual
      * number can be lower when `minVerticalLineDistance` does not allow that many lines to fit.
      */
-    public maxVerticalLines: number = 20;
+    public maxVerticalLines: number = 25;
 
     /**
      * Minimum distance between two adjacent vertical grid lines, in world units. This keeps the
      * lines and their labels from overlapping when the chart is narrow or zoomed out.
      */
     public minVerticalLineDistance: number = 0.05;
-
-    /**
-     * Number of bars between two adjacent vertical grid lines. Chosen so that neither
-     * `maxVerticalLines` nor `minVerticalLineDistance` is exceeded.
-     *
-     * This is derived from the number of *visible* bars, so zooming out (which shows more bars)
-     * automatically widens the stride and the line count never exceeds `maxVerticalLines`.
-     */
-    public get verticalLineStride(): number {
-        const numBars = this.numBarsVisible;
-
-        if (numBars <= 0)
-            return 1;
-
-        const barSpacingWorld = this.chartWidth / numBars;
-
-        // Enough bars per line to stay within the maximum line count.
-        const strideByCount = Math.ceil(numBars / Math.max(1, this.maxVerticalLines));
-
-        // Enough bars per line to keep the lines at least `minVerticalLineDistance` apart.
-        const strideByDistance = barSpacingWorld > 0 && this.minVerticalLineDistance > 0
-            ? Math.ceil(this.minVerticalLineDistance / barSpacingWorld)
-            : 1;
-
-        return Math.max(1, strideByCount, strideByDistance);
-    }
-
-    /**
-     * Number of vertical grid lines actually drawn on the chart.
-     */
-    public get numVerticalLines(): number {
-        const numBars = this.numBarsVisible;
-
-        if (numBars <= 0)
-            return 0;
-
-        return Math.ceil(numBars / this.verticalLineStride);
-    }
-
-    /**
-     * Distance between two adjacent vertical grid lines, in world units.
-     */
-    public get verticalGridLineDistance(): number {
-        const numBars = this.numBarsVisible;
-
-        if (numBars <= 0)
-            return 0;
-
-        return this.verticalLineStride * this.chartWidth / numBars;
-    }
 
     /**
      * Lowest price of the initial price window. Aligned to a multiple of `priceStep`.
@@ -190,17 +145,23 @@ export class Chart extends Gfx.Object3D
     }
 
     /**
-     * Current vertical distance between grid lines, based on the bar width and spacing.
+     * Current world-space distance between two adjacent bars, i.e. the on-screen bar spacing.
+     *
+     * This follows the zoom level, so it is the right reference for anything that has to stay
+     * proportional to the bars on screen (edge fade, hover markers). Use `barStep` for the
+     * unzoomed spacing that `scrollX` is expressed in.
      */
     public get verticalLineDistance(): number {
-        return this.chartWidth / this.numBarsVisible / this.zoom;
+        return this.worldPerBar;
     }
 
     /**
-     * Current horizontal distance between grid lines, based on the bar width and spacing.
+     * Current vertical distance between horizontal grid lines.
+     *
+     * Zooming is horizontal only, so the vertical spacing never changes with the zoom level.
      */
     public get horizontalLineDistance(): number {
-        return (this.chartHeight / this.maxHorizontalLines) * this.zoom;
+        return this.chartHeight / this.maxHorizontalLines;
     }
 
     /**
@@ -300,6 +261,28 @@ export class Chart extends Gfx.Object3D
         return null;
     }
 
+    /** User-given indicator names by indicator type id, shown in the chart's popups. */
+    private indicatorNames: Record<string, string> = {};
+
+    /**
+     * Sets the names the popups show for the indicators, keyed by indicator type id.
+     * The first indicator of a type wins, because series are matched by type.
+     */
+    public setIndicatorNames(names: Record<string, string>): void {
+        this.indicatorNames = names;
+        this.grid.updateLabels();
+    }
+
+    /**
+     * Returns the name to show for a series' `indicator_info.name` (e.g. `(42) MA`): the
+     * user-given name, or the type id when none is set.
+     */
+    public getIndicatorDisplayName(rawName: string | undefined): string {
+        const typeId = Chart.stripIndicatorIndex(rawName ?? '');
+
+        return this.indicatorNames[typeId]?.trim() || typeId;
+    }
+
     /**
      * Removes the `(index) ` prefix the wasm layer puts in front of indicator names.
      */
@@ -354,11 +337,87 @@ export class Chart extends Gfx.Object3D
     }
 
     /**
-     * Assigns an explicit color to the series belonging to the given indicator type.
+     * Fades every series except the ones belonging to `highlightedTypeId`.
      *
-     * Passing null clears the override, so the series falls back to its palette color.
+     * Used while the user hovers an indicator's settings, so the indicator being configured stands
+     * out from the rest of the chart. Passing `null` restores every series to full opacity.
+     *
+     * When an indicator is isolated (see `setSeriesIsolated()`) the isolation keeps dimming the
+     * other indicators, but the hovered one is shown at full opacity as well, so it can be compared
+     * against the isolated one.
+     *
+     * @param highlightedTypeId Indicator type to keep at full opacity, or `null` for none.
+     * @param dimFactor Opacity applied to the other indicators, 0..1.
      */
-    public setSeriesColor(typeId: string, color: number | null): void {
+    public setSeriesDimmed(highlightedTypeId: string | null, dimFactor: number = Chart.DIMMED_OPACITY): void {
+        this.hoveredTypeId = highlightedTypeId;
+        this.applySeriesDimming(dimFactor);
+    }
+
+    /**
+     * Isolates a single indicator: it stays at full opacity while every other indicator is faded.
+     *
+     * This is the persistent counterpart of the hover highlight — it is driven by the chart's
+     * "Isolate" selector rather than by the pointer. Passing `null` turns isolation off.
+     *
+     * @param isolatedTypeId Indicator type to keep at full opacity, or `null` to show everything.
+     * @param dimFactor Opacity applied to the other indicators, 0..1.
+     */
+    public setSeriesIsolated(isolatedTypeId: string | null, dimFactor: number = Chart.DIMMED_OPACITY): void {
+        this.isolatedTypeId = isolatedTypeId;
+        this.applySeriesDimming(dimFactor);
+    }
+
+    /**
+     * Indicator type the user isolated through the chart's "Isolate" selector, or `null`.
+     */
+    public isolatedTypeId: string | null = null;
+
+    /**
+     * Indicator type whose settings panel is currently hovered, or `null`.
+     */
+    private hoveredTypeId: string | null = null;
+
+    /**
+     * Pushes the current dim factors to every series and redraws the parts of the grid that mirror
+     * them.
+     *
+     * The isolated indicator and the hovered one are both kept at full opacity; everything else is
+     * faded. When neither is set every series is drawn normally.
+     */
+    private applySeriesDimming(dimFactor: number): void {
+        const highlighted = new Set<string>();
+
+        if (this.isolatedTypeId !== null)
+            highlighted.add(this.isolatedTypeId);
+
+        if (this.hoveredTypeId !== null)
+            highlighted.add(this.hoveredTypeId);
+
+        for (const series of this.series) {
+            const name = series.data?.indicator_info?.name;
+            const typeId = name ? Chart.stripIndicatorIndex(name) : null;
+            const dimmed = highlighted.size > 0 && (typeId === null || !highlighted.has(typeId));
+
+            series.setDimFactor(dimmed ? dimFactor : 1);
+        }
+
+        // The last-price lines and their labels are drawn by the grid, which reads the series' dim
+        // factors, so it has to be redrawn as well.
+        this.grid.updateColors();
+        this.grid.updateLabels();
+    }
+
+    /** Opacity applied to the indicators that are not being configured. */
+    public static readonly DIMMED_OPACITY: number = 0.03;
+
+    /**
+     * Assigns one explicit color per value channel to the series belonging to the given indicator
+     * type, so every line of a multi-value indicator can be colored on its own.
+     *
+     * Passing an empty array clears the overrides, so the series falls back to its palette colors.
+     */
+    public setSeriesColors(typeId: string, colors: (number | null)[]): void {
         let changed = false;
 
         for (const series of this.series) {
@@ -367,7 +426,7 @@ export class Chart extends Gfx.Object3D
             if (!name || Chart.stripIndicatorIndex(name) !== typeId)
                 continue;
 
-            series.setColorOverride(color);
+            series.setColorOverrides(colors);
             changed = true;
         }
 
@@ -415,8 +474,9 @@ export class Chart extends Gfx.Object3D
                 value,
                 // Price series are shifted by scrollY, so their last-price line must follow.
                 worldY: this.priceToWorldY(value) + this.scrollY,
-                // Use the color the series is actually drawn with, so the line matches the chart.
-                color: series.color,
+                // Use the color the value is actually drawn with, so the line matches the chart.
+                color: series.getValueChannelColorNumber(valueIndex),
+                dimFactor: series.dimFactor,
             });
         }
 
@@ -464,6 +524,23 @@ export class Chart extends Gfx.Object3D
     private cachedOHLC: { o: number, h: number, l: number, c: number } | null = null;
 
     /**
+     * Smallest zoom level the chart can be zoomed out to. Zooming out shows more bars, so this
+     * also caps how many bars can be visible at once.
+     */
+    public static readonly MIN_ZOOM: number = 1 / 8;
+
+    /**
+     * Largest zoom level the chart can be zoomed in to.
+     */
+    public static readonly MAX_ZOOM: number = 8;
+
+    /**
+     * Multiplier applied to the chart's zoom for one mouse-wheel notch. Fractional notches (e.g.
+     * trackpads) scale the multiplier exponentially, so the zoom stays smooth.
+     */
+    public static readonly ZOOM_WHEEL_FACTOR: number = 1.2;
+
+    /**
      * The zoom level of the chart. This will be used to scale the chart and its contents.
      */
     private _zoom: number = 1.0;
@@ -477,12 +554,78 @@ export class Chart extends Gfx.Object3D
 
     /**
      * Sets the current zoom level of the chart.
+     *
+     * The value is clamped to `MIN_ZOOM`..`MAX_ZOOM`, so callers do not have to guard against
+     * zooming the chart out of existence.
      */
     public set zoom(value: number) {
-        this._zoom = value;
-        this.numBarsVisible = Math.floor(this.numInitialBars / this._zoom);
+        this._zoom = Chart.clampZoom(value);
+        this.numBarsVisible = Math.max(1, Math.floor(this.numInitialBars / this._zoom));
 
         this.refreshSeriesData();
+    }
+
+    /**
+     * Clamps the given zoom level to the range the chart supports.
+     */
+    public static clampZoom(zoom: number): number {
+        if (!Number.isFinite(zoom))
+            return 1;
+
+        return Math.max(Chart.MIN_ZOOM, Math.min(zoom, Chart.MAX_ZOOM));
+    }
+
+    /**
+     * World-space distance between two adjacent bars at the current zoom level.
+     *
+     * `scrollX` is measured in these units, so this is what converts a scroll offset into a
+     * number of bars and back.
+     */
+    public get worldPerBar(): number {
+        return this.barStep * this.zoom;
+    }
+
+    /**
+     * Unzoomed world-space distance between two adjacent bars.
+     *
+     * This is the spacing `Series.layoutBars()` places the bars at, before the zoom factor is
+     * applied, and it is what `scrollX` is expressed in.
+     */
+    public get barStep(): number {
+        return this.barWidth + this.barSpacing;
+    }
+
+    /**
+     * Zooms the chart by the given factor while keeping the bar under a horizontal position fixed
+     * on screen.
+     *
+     * The anchor is what makes wheel zooming feel natural: the bar under the cursor stays under
+     * the cursor instead of the chart growing around its centre.
+     *
+     * @param factor Multiplier applied to the current zoom. Values above 1 zoom in, below 1 zoom out.
+     * @param anchorFraction Horizontal position inside the chart, 0 = left edge, 1 = right edge.
+     */
+    public zoomBy(factor: number, anchorFraction: number = 0.5): void {
+        const previousZoom = this.zoom;
+        const nextZoom = Chart.clampZoom(previousZoom * factor);
+
+        if (nextZoom === previousZoom)
+            return;
+
+        const anchor = Number.isFinite(anchorFraction)
+            ? Math.max(0, Math.min(anchorFraction, 1))
+            : 0.5;
+
+        // Fractional bar index currently under the anchor, in dataset coordinates. `scrollX` is
+        // measured in on-screen bar widths, so it has to be divided by the *current* spacing.
+        const anchorBar = this.scrollX / this.worldPerBar + anchor * this.numBarsVisible;
+
+        this.zoom = nextZoom;
+
+        // The visible window changed size, so the scroll offset has to be recomputed to put the
+        // same bar back under the anchor. Snapping avoids a visible slide while the smooth
+        // scroll interpolation catches up.
+        this.scrollTo((anchorBar - anchor * this.numBarsVisible) * this.worldPerBar, this.targetScrollY, true);
     }
 
     private _domBarHover: HTMLElement = document.createElement('div');
@@ -585,6 +728,7 @@ export class Chart extends Gfx.Object3D
             transparent: true,
             opacity: 0.35,
             depthTest: false,
+            depthWrite: false,
         });
 
         this.hoverColumnMesh = new Gfx.Line(geometry, this.hoverColumnMaterial);
@@ -644,7 +788,8 @@ export class Chart extends Gfx.Object3D
      *
      * Price series use the chart's price precision and non-price indicators are shown with two
      * decimals. Every value is prefixed with its bolded title (e.g. "**Jaw** 1.2345"), taken from
-     * the indicator's `valueTitles` in `AppStaticSettings`, so the values can be told apart.
+     * the indicator's `valueTitles` in `AppStaticSettings`, so the values can be told apart, and
+     * is drawn in the color of its own line so the tooltip matches the chart.
      */
     private formatBarValues(series: Series, values: number[]): string {
         const digits = series.isPriceSeries ? this.priceDigits : 2;
@@ -658,10 +803,12 @@ export class Chart extends Gfx.Object3D
 
         return values.map((value, index) => {
             const title = titles[index] ?? fallbackTitles[index];
-
-            return title
+            const color = Series.formatColor(series.getValueChannelColorNumber(index));
+            const text = title
                 ? `<b>${Chart.escapeHtml(title)}</b> ${format(value)}`
                 : format(value);
+
+            return `<span style="color:${color}">${text}</span>`;
         }).join(' ');
     }
 
@@ -678,11 +825,11 @@ export class Chart extends Gfx.Object3D
     /**
      * Formats a bar timestamp (ms) as "D Mon YYYY HH:MM" for the hover tooltip.
      *
-     * Unlike the grid labels this uses the timestamp as-is, so the tooltip reports the exact time
-     * of the hovered bar.
+     * The timestamp is shifted back by one hour, matching the grid labels, because the stored
+     * times are one hour ahead of the time the bars are meant to represent.
      */
     private static formatBarTime(timeMs: number): string {
-        const date = new Date(timeMs);
+        const date = new Date(timeMs - 60 * 60 * 1000);
         const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
         const hours = date.getHours().toString().padStart(2, '0');
         const minutes = date.getMinutes().toString().padStart(2, '0');
@@ -731,7 +878,7 @@ export class Chart extends Gfx.Object3D
                 if (timeMs === 0 && bar.time_ms > 0)
                     timeMs = bar.time_ms;
 
-                const name = Chart.stripIndicatorIndex(series.data?.indicator_info?.name ?? '') || 'Series';
+                const name = this.getIndicatorDisplayName(series.data?.indicator_info?.name) || 'Series';
                 const color = Series.formatColor(series.color);
 
                 lines.push(
@@ -868,14 +1015,6 @@ export class Chart extends Gfx.Object3D
         
         //this.scrollTo(0, 0); // Refresh the chart to reflect the new data.
         this.onDataSet?.();
-    }
-
-    /**
-     * Rounds a number to the given number of decimal digits, removing floating point noise.
-     */
-    private static roundTo(value: number, digits: number): number {
-        const factor = Math.pow(10, digits);
-        return Math.round(value * factor) / factor;
     }
 
     /**
@@ -1045,47 +1184,53 @@ export class Chart extends Gfx.Object3D
 
         this.priceDigits = digits;
 
-        const precision = Math.pow(10, -digits);
+        // All arithmetic is done in integer points (1 point = 10^-digits) to avoid float noise.
+        const unit = Math.pow(10, digits);
         const numLines = this.maxHorizontalLines;
 
-        // Highest price rounded up and lowest price rounded down to the symbol's precision.
-        const upper = Chart.roundTo(Math.ceil(max / precision) * precision, digits);
-        const lower = Chart.roundTo(Math.floor(min / precision) * precision, digits);
+        const upperPts = Math.ceil(max * unit - 1e-6);
+        const lowerPts = Math.floor(min * unit + 1e-6);
 
-        let diff = upper - lower;
+        // Lines are anchored at the whole-unit price below the data (e.g. 1.00000), so steps such as
+        // 15 points give 1.00015, 1.00030, ...
+        const anchorPts = Math.floor(lowerPts / unit) * unit;
 
-        if (diff <= 0) {
-            // Flat data — fall back to one precision unit per line so the window stays usable.
-            diff = precision * numLines;
+        const diffPts = Math.max(upperPts - lowerPts, numLines);
+
+        let step = 1;
+        let alignedLowerPts = lowerPts;
+
+        // Smallest human-friendly step that keeps the whole data range inside the window.
+        for (const candidate of Chart.niceStepsInPoints(Math.ceil(diffPts / numLines))) {
+            const lowerAligned = anchorPts + Math.floor((lowerPts - anchorPts) / candidate) * candidate;
+
+            step = candidate;
+            alignedLowerPts = lowerAligned;
+
+            if (lowerAligned + candidate * numLines >= upperPts)
+                break;
         }
 
-        // Raw step, rounded up to the symbol's precision so every line lands on a valid price.
-        let step = Chart.roundTo(Math.ceil((diff / numLines) / precision) * precision, digits);
+        this.priceStep = step / unit;
+        this.priceMin = alignedLowerPts / unit;
+        this.priceMax = (alignedLowerPts + step * numLines) / unit;
+    }
 
-        if (step <= 0)
-            step = precision;
+    /**
+     * Yields integer step sizes (in points) that read well as price differences: 1, 2, 5, 10, 15,
+     * 20, 25, 50, 100, 150, ... — never smaller than `minPoints`.
+     */
+    private static *niceStepsInPoints(minPoints: number): Generator<number> {
+        const mantissas = [1, 1.5, 2, 2.5, 5];
 
-        // Aligning the window to whole steps keeps the price difference between lines constant.
-        // Aligning the lower bound down can lose up to one step, so the step is grown until the
-        // window covers the rounded upper price again. Recomputing the required step directly
-        // converges in one or two passes.
-        let alignedLower = Chart.roundTo(Math.floor(lower / step) * step, digits);
-        let alignedUpper = Chart.roundTo(alignedLower + step * numLines, digits);
+        for (let power = 1; power < 1e15; power *= 10) {
+            for (const mantissa of mantissas) {
+                const value = mantissa * power;
 
-        for (let pass = 0; pass < 8 && alignedUpper < upper; pass++) {
-            const required = (upper - alignedLower) / numLines;
-            step = Chart.roundTo(Math.ceil(required / precision) * precision, digits);
-
-            if (step <= 0)
-                step = precision;
-
-            alignedLower = Chart.roundTo(Math.floor(lower / step) * step, digits);
-            alignedUpper = Chart.roundTo(alignedLower + step * numLines, digits);
+                if (Number.isInteger(value) && value >= minPoints)
+                    yield value;
+            }
         }
-
-        this.priceStep = step;
-        this.priceMin = alignedLower;
-        this.priceMax = alignedUpper;
     }
 
     /**
@@ -1226,6 +1371,95 @@ export class Chart extends Gfx.Object3D
     }
 
     /**
+     * Duration of one bar in ms (the smallest real gap in the timeline, so weekend gaps are
+     * ignored), or 0 when unknown.
+     */
+    public get barDurationMs(): number {
+        if (this._barDurationMs !== null)
+            return this._barDurationMs;
+
+        const times = this.timeline;
+
+        if (!times || times.length < 2)
+            return 0;
+
+        let min = Infinity;
+
+        for (let i = 1; i < Math.min(times.length, 500); i++) {
+            const diff = times[i] - times[i - 1];
+
+            if (diff >= 1000 && diff < min)
+                min = diff;
+        }
+
+        this._barDurationMs = Number.isFinite(min) ? min : 0;
+
+        return this._barDurationMs;
+    }
+
+    private _barDurationMs: number | null = null;
+
+    /**
+     * Converts a timestamp (ms) into a fractional dataset index. Times outside the data are
+     * extrapolated using the bar duration, so they may be negative or past the last bar.
+     * Returns null when there is no timeline.
+     */
+    public fractionalIndexAtTime(timeMs: number): number | null {
+        const times = this.timeline;
+        const barMs = this.barDurationMs;
+
+        if (!times || times.length === 0 || barMs <= 0)
+            return null;
+
+        const last = times.length - 1;
+
+        if (timeMs <= times[0])
+            return (timeMs - times[0]) / barMs;
+
+        if (timeMs >= times[last])
+            return last + (timeMs - times[last]) / barMs;
+
+        let low = 0;
+        let high = last;
+
+        // Invariant: times[low] <= timeMs < times[high].
+        while (high - low > 1) {
+            const mid = (low + high) >> 1;
+
+            if (times[mid] <= timeMs)
+                low = mid;
+            else
+                high = mid;
+        }
+
+        return low + (timeMs - times[low]) / (times[high] - times[low]);
+    }
+
+    /**
+     * Converts a fractional dataset index into a timestamp (ms), extrapolating outside the data.
+     * Returns null when there is no timeline.
+     */
+    public timeAtFractionalIndex(index: number): number | null {
+        const times = this.timeline;
+        const barMs = this.barDurationMs;
+
+        if (!times || times.length === 0 || barMs <= 0)
+            return null;
+
+        const last = times.length - 1;
+
+        if (index <= 0)
+            return times[0] + index * barMs;
+
+        if (index >= last)
+            return times[last] + (index - last) * barMs;
+
+        const low = Math.floor(index);
+
+        return times[low] + (index - low) * (times[low + 1] - times[low]);
+    }
+
+    /**
      * Returns the window of dataset indices to show: `[startIndex, endIndexExclusive)`.
      *
      * The scroll position is expressed in bars of the timeline, so the window is simply the slice
@@ -1259,6 +1493,7 @@ export class Chart extends Gfx.Object3D
      */
     private buildTimeline(timeframe?: number): void {
         this.timeline = null;
+        this._barDurationMs = null;
 
         if (!this.data || this.data.length === 0)
             return;
@@ -1392,8 +1627,10 @@ export class Chart extends Gfx.Object3D
         bbox.expandByPoint(new Gfx.Vector3(0, 0, 0));
         bbox.expandByPoint(new Gfx.Vector3(0, this.chartHeight, 0));
 
-        // Horizontal extent — chart is centered at x=0 so bars and grid lines align.
-        const chartWidth = this.numBarsVisible * (this.barWidth + this.barSpacing);
+        // Horizontal extent — chart is centered at x=0 so bars and grid lines align. The width is
+        // derived from the *initial* bar count, so it does not change when the chart is zoomed:
+        // zooming only changes how many bars fit into the same world-space width.
+        const chartWidth = this.numInitialBars * (this.barWidth + this.barSpacing);
         bbox.expandByPoint(new Gfx.Vector3(-chartWidth / 2, 0, 0));
         bbox.expandByPoint(new Gfx.Vector3( chartWidth / 2, 0, 0));
 
@@ -1408,10 +1645,18 @@ export class Chart extends Gfx.Object3D
      * 
      * @param x The target horizontal scroll position.
      * @param y The target vertical scroll position.
+     * @param snap When true the current scroll position jumps to the target immediately instead of
+     * being interpolated towards it. Used by zooming, where a lagging scroll would make the chart
+     * slide after the zoom has already been applied.
      */
-    public scrollTo(x: number, y: number = 0): void {
+    public scrollTo(x: number, y: number = 0, snap: boolean = false): void {
         this.targetScrollX = Math.max(0, Math.min(x, this.getMaxScrollX()));
         this.targetScrollY = y;
+
+        if (snap) {
+            this.scrollX = this.targetScrollX;
+            this.scrollY = this.targetScrollY;
+        }
     }
 
     private static readonly TRAILING_BARS = 2;
@@ -1422,7 +1667,7 @@ export class Chart extends Gfx.Object3D
         // sit exactly on the edge and be invisible. Allow scrolling a couple of bars past the data.
         const maxStartIndex = Math.max(0, dataLength - this.numBarsVisible + Chart.TRAILING_BARS);
 
-        return maxStartIndex * this.verticalLineDistance * this.zoom;
+        return maxStartIndex * this.worldPerBar;
     }
 
     /**
@@ -1457,11 +1702,11 @@ export class Chart extends Gfx.Object3D
         this.scrollY = this.targetScrollY;
 
         // Calculating index of the bar that should be displayed on the left side of the chart. We take into consideration zoom level.
-        let barIndex = Math.floor(this.scrollX / this.verticalLineDistance / this.zoom);
+        let barIndex = Math.floor(this.scrollX / this.worldPerBar);
 
         this.startIndex = barIndex;
 
-        let shiftedPositionX = this.scrollX % (this.verticalLineDistance * this.zoom);
+        let shiftedPositionX = this.scrollX % this.worldPerBar;
 
         for (const series of this.series) {
             series.position.x = -this.chartWidth / 2 - shiftedPositionX;

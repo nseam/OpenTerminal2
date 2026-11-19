@@ -1,4 +1,5 @@
 import { nextTick, reactive, watch } from "vue";
+import { ensureChartsIndicatorColors } from "./IndicatorColors";
 
 /**
  * Tick data a chart is fed with.
@@ -29,10 +30,29 @@ export interface AppRoamingStateChart {
      * default one when the chart is run.
      */
     timeframe?: string;
+    /**
+     * UUID of the indicator the chart is isolated to, or missing/`null` when every indicator is
+     * shown.
+     *
+     * While an indicator is isolated it is drawn at full opacity and every other indicator is
+     * faded, so a single indicator can be inspected against the chart. The hover highlight is
+     * disabled in that state, except that the hovered indicator is also shown at full opacity.
+     */
+    isolatedIndicator?: string | null;
     indicators: {
         uuid: string;
         typeId: string;
         config: any;
+        /**
+         * Name shown for the indicator in the chart's popups. Defaults to the type id; missing on
+         * indicators saved before they could be renamed.
+         */
+        name?: string;
+        /**
+         * UUID of another indicator of the same chart this indicator runs over. When missing, the
+         * indicator runs over the time-frame indicator.
+         */
+        source?: string;
         /**
          * Time-frame the indicator is calculated on, as an id from `APP_TIMEFRAMES`.
          *
@@ -46,8 +66,18 @@ export interface AppRoamingStateChart {
          */
         visible?: boolean;
         /**
-         * Color the indicator is drawn with, as a `#rrggbb` string. Stored per indicator so the
-         * color stays with it when the list is reordered.
+         * Colors the indicator's values are drawn with, as `#rrggbb` strings.
+         *
+         * One entry per value the indicator emits, in emission order, so every line of a
+         * multi-value indicator (e.g. Bands' Base/Upper/Lower) can be colored on its own. Stored
+         * per indicator so the colors stay with it when the list is reordered.
+         */
+        colors?: string[];
+        /**
+         * Color the indicator is drawn with, as a `#rrggbb` string.
+         *
+         * @deprecated Superseded by `colors`, which holds one color per value. Only read when
+         * migrating a project saved before per-value colors existed; it is dropped afterwards.
          */
         color?: string;
         /**
@@ -241,6 +271,9 @@ function restore(snapshot: string): void {
 
     AppRoamingState.charts = Array.isArray(parsed.charts) ? parsed.charts : [];
 
+    // Snapshots taken before per-value colors existed only hold a single color per indicator.
+    ensureChartsIndicatorColors(AppRoamingState.charts);
+
     // The deep watcher runs asynchronously, so the flag has to stay set until the pending flush
     // is done, otherwise the restore itself would be recorded as a new change.
     nextTick(() => {
@@ -349,6 +382,9 @@ export const AppRoamingState = reactive({
 
         AppRoamingState.charts = Array.isArray(charts) ? charts : [];
 
+        // Projects saved before per-value colors existed only hold a single color per indicator.
+        ensureChartsIndicatorColors(AppRoamingState.charts);
+
         nextTick(() => { restoreDepth--; });
 
         // The replaced state becomes the new starting point of the history.
@@ -365,6 +401,12 @@ if (savedState) {
 
         if (Array.isArray(parsed?.charts)) {
             AppRoamingState.charts = parsed.charts;
+
+            // States saved before per-value colors existed only hold a single color per indicator.
+            // The migration runs before the watcher below is registered, so the result is written
+            // back explicitly instead of waiting for the next change.
+            ensureChartsIndicatorColors(AppRoamingState.charts);
+            localStorage.setItem('AppRoamingState', JSON.stringify({ charts: AppRoamingState.charts }));
         }
     }
     catch (error) {

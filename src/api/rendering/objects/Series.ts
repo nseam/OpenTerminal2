@@ -86,7 +86,11 @@ export class Series extends Gfx.Object3D
 
     private valuePointPickGeometry: Gfx.CircleGeometry = new Gfx.CircleGeometry(1, 12);
 
-    private valuePointMaterial: Gfx.MeshBasicMaterial = new Gfx.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
+    private valuePointMaterial: Gfx.MeshBasicMaterial = new Gfx.MeshBasicMaterial({
+        color: 0xffffff,
+        depthTest: false,
+        depthWrite: false,
+    });
 
     private valuePointPickMaterial: Gfx.MeshBasicMaterial = new Gfx.MeshBasicMaterial({
         colorWrite: false,
@@ -141,6 +145,33 @@ export class Series extends Gfx.Object3D
      * be shown again without re-running the indicator.
      */
     public visible: boolean = true;
+
+    /**
+     * Multiplier applied to every alpha this series computes, in the range 0..1.
+     *
+     * Used to fade the series that do not belong to the indicator whose settings are being hovered
+     * (see `Chart.setSeriesDimmed()`). It is applied on top of the edge fade, so a dimmed series
+     * still fades out at the chart borders instead of turning into a hard-edged band.
+     */
+    public dimFactor: number = 1;
+
+    /**
+     * Sets how strongly this series is dimmed and redraws it.
+     *
+     * @param factor 1 draws the series normally, 0.3 fades it into the background.
+     */
+    public setDimFactor(factor: number): void {
+        const clamped = Math.max(0, Math.min(1, factor));
+
+        if (this.dimFactor === clamped)
+            return;
+
+        this.dimFactor = clamped;
+
+        // The alpha is baked into the geometry buffers, so they have to be rebuilt.
+        if (this.visible)
+            this.updateGraphics();
+    }
 
     /**
      * Whether this series holds price values (as opposed to e.g. a 0..100 oscillator). Price series
@@ -203,17 +234,21 @@ export class Series extends Gfx.Object3D
     private static readonly lineColorCache: Gfx.Color[] = Series.LINE_SERIES_COLORS.map(c => new Gfx.Color(c));
 
     /**
-     * Explicit color (0xRRGGBB) assigned to this series, or null to derive it from the index.
+     * Explicit colors (0xRRGGBB) assigned to the value channels of this series, indexed by channel.
      *
-     * An explicit color keeps an indicator's color stable when the indicator list is reordered.
+     * A `null` entry (or a missing one) makes that channel fall back to the palette color derived
+     * from the series index. Explicit colors keep an indicator's colors stable when the indicator
+     * list is reordered, and let every value of a multi-value indicator be colored separately.
      */
-    private _colorOverride: number | null = null;
+    private _colorOverrides: (number | null)[] = [];
 
     /**
-     * Sets an explicit color for this series, or clears it when null is given.
+     * Sets the explicit colors of this series' value channels.
+     *
+     * Passing an empty array clears every override, so the series falls back to its palette colors.
      */
-    public setColorOverride(color: number | null): void {
-        this._colorOverride = color;
+    public setColorOverrides(colors: (number | null)[]): void {
+        this._colorOverrides = Array.isArray(colors) ? [...colors] : [];
     }
 
     /**
@@ -260,10 +295,35 @@ export class Series extends Gfx.Object3D
     }
 
     /**
-     * The color (0xRRGGBB) this series is drawn with on the chart.
+     * The color (0xRRGGBB) this series is drawn with on the chart, i.e. the color of its first
+     * value channel.
      */
     public get color(): number {
-        return this._colorOverride ?? Series.getSeriesColor(this._index);
+        return this.getValueChannelColorNumber(0);
+    }
+
+    /**
+     * Returns the color (0xRRGGBB) of the given value channel of this series.
+     *
+     * An explicit color wins; otherwise the palette color derived from the series index is used,
+     * so a series without overrides still draws every channel in a distinct color. A single
+     * explicit color applies to every channel, which is what a single-value indicator and a
+     * candlestick series (whose bars are colored by the bull/bear relationship) want.
+     */
+    public getValueChannelColorNumber(valueIndex: number): number {
+        const override = this._colorOverrides[valueIndex];
+
+        if (override !== null && override !== undefined)
+            return override;
+
+        // A single color describes the whole series, not just its first channel.
+        if (this._colorOverrides.length === 1 && this._colorOverrides[0] !== null && this._colorOverrides[0] !== undefined)
+            return this._colorOverrides[0];
+
+        // Channels without an override continue through the palette from the series' own slot.
+        const baseIndex = this._colorOverrides.findIndex(color => color !== null && color !== undefined);
+
+        return Series.getSeriesColor(valueIndex + (baseIndex >= 0 ? baseIndex : this._index));
     }
 
     /**
@@ -273,14 +333,15 @@ export class Series extends Gfx.Object3D
      * channels continue through the palette from there.
      */
     private getValueChannelColor(valueIndex: number): Gfx.Color {
-        if (this._colorOverride === null)
-            return Series.getLineColor(valueIndex + this._index);
+        const override = this._colorOverrides[valueIndex];
 
-        if (valueIndex === 0)
-            return this._tempChannelColor.set(this._colorOverride);
+        if (override !== null && override !== undefined)
+            return this._tempChannelColor.set(override);
 
-        // Continue through the palette, starting after the overridden color's palette slot.
-        const baseIndex = Series.LINE_SERIES_COLORS.indexOf(this._colorOverride);
+        if (this._colorOverrides.length === 1 && this._colorOverrides[0] !== null && this._colorOverrides[0] !== undefined)
+            return this._tempChannelColor.set(this._colorOverrides[0]);
+
+        const baseIndex = this._colorOverrides.findIndex(color => color !== null && color !== undefined);
 
         return Series.getLineColor(valueIndex + (baseIndex >= 0 ? baseIndex : this._index));
     }
@@ -316,9 +377,13 @@ export class Series extends Gfx.Object3D
 
     /**
      * Creates the shared box material with per-instance alpha support via shader injection.
+     *
+     * Depth writes are disabled: the bars are transparent and are drawn back-to-front by three.js,
+     * so writing depth would let a nearer bar hide the ones behind it and make overlapping
+     * indicators (and the dimmed ones) disappear instead of blending.
      */
     private static createCubeMaterial(): Gfx.MeshLambertMaterial {
-        const mat = new Gfx.MeshLambertMaterial({ transparent: true });
+        const mat = new Gfx.MeshLambertMaterial({ transparent: true, depthWrite: false });
         mat.onBeforeCompile = (shader) => {
             // Inject instance color attribute so per-instance colors are read.
             shader.vertexShader =
@@ -346,9 +411,12 @@ export class Series extends Gfx.Object3D
 
     /**
      * Creates a line material with per-vertex alpha support via shader injection.
+     *
+     * Depth writes are disabled for the same reason as the bars: the lines are transparent, so
+     * writing depth would make a line hide the lines drawn behind it.
      */
     private static createLineMaterial(): Gfx.LineBasicMaterial {
-        const mat = new Gfx.LineBasicMaterial({ vertexColors: true, transparent: true });
+        const mat = new Gfx.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false });
         mat.onBeforeCompile = (shader) => {
             shader.vertexShader =
                 'attribute float opacity;\nvarying float vOpacity;\n' +
@@ -742,7 +810,9 @@ export class Series extends Gfx.Object3D
 
         alpha = Math.min(alpha, Math.pow(distToEdgeY / fadeDistanceY, 2));
 
-        return alpha;
+        // Dimming is applied last, so a dimmed series keeps its edge fade instead of becoming a
+        // hard-edged band that stops at the chart border.
+        return alpha * this.dimFactor;
     }
 
     /**
@@ -882,6 +952,22 @@ export class Series extends Gfx.Object3D
             const bar  = this.bars[barIdx];
             const base = barIdx * 6;
 
+            // Bars past the data (or before an indicator starts) have no values. Mapping
+            // `undefined` through `valueToWorldY()` would produce NaN positions, which makes
+            // three.js fail to compute the geometry's bounding sphere, so they get a degenerate
+            // segment at the chart's baseline instead.
+            if (bar.values.length === 0) {
+                positions[base + 0] = bar.posX; positions[base + 1] = 0; positions[base + 2] = 0;
+                positions[base + 3] = bar.posX; positions[base + 4] = 0; positions[base + 5] = 0;
+
+                if (opacities) {
+                    opacities[barIdx * 2 + 0] = 0;
+                    opacities[barIdx * 2 + 1] = 0;
+                }
+
+                continue;
+            }
+
             // Map high and low into the same coordinate system as the bars.
             let hNorm;
 
@@ -908,7 +994,7 @@ export class Series extends Gfx.Object3D
 
             const lineMinY = Math.min(hNorm, lNorm);
             const lineMaxY = Math.max(hNorm, lNorm);
-            const lineAlpha = bar.values.length === 0 ? 0 : this.computeEdgeFadeAlpha(bar.posX, lineMinY, lineMaxY);
+            const lineAlpha = this.computeEdgeFadeAlpha(bar.posX, lineMinY, lineMaxY);
 
             if (opacities) {
                 // Opacity attribute has itemSize 1 (one value per vertex), unlike position/color's itemSize 3.
@@ -1184,7 +1270,11 @@ export class Series extends Gfx.Object3D
         }
 
         if (!this.selectedPointMesh) {
-            this.selectedPointMaterial = new Gfx.MeshBasicMaterial({ color: 0xffff00, depthTest: false });
+            this.selectedPointMaterial = new Gfx.MeshBasicMaterial({
+                color: 0xffff00,
+                depthTest: false,
+                depthWrite: false,
+            });
             this.selectedPointMesh = new Gfx.Mesh(new Gfx.RingGeometry(0.65, 1, 16), this.selectedPointMaterial);
             this.selectedPointMesh.renderOrder = 998;
             this.add(this.selectedPointMesh);

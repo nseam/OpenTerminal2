@@ -179,7 +179,7 @@
                                         </div>
 
                                         <div class="chart-tick-source flex flex-row items-center mb-2">
-                                            <span class="chart-tick-source-label">Ticks</span>
+                                            <span class="chart-tick-source-label flex justify-end">Ticks</span>
                                             <ElSelect
                                                 :model-value="chart.tickSource?.path ?? ''"
                                                 class="flex flex-1"
@@ -197,7 +197,7 @@
                                         </div>
 
                                         <div class="chart-tick-source flex flex-row items-center mb-2">
-                                            <span class="chart-tick-source-label">Time-frame</span>
+                                            <span class="chart-tick-source-label flex justify-end">Time-frame</span>
                                             <ElSelect
                                                 :model-value="getChartTimeframe(chart)"
                                                 class="flex flex-1"
@@ -209,6 +209,24 @@
                                                     :key="timeframe.id"
                                                     :label="timeframe.label"
                                                     :value="timeframe.id"
+                                                />
+                                            </ElSelect>
+                                        </div>
+
+                                        <div class="chart-tick-source flex flex-row items-center mb-2">
+                                            <span class="chart-tick-source-label flex justify-end">Isolate</span>
+                                            <ElSelect
+                                                :model-value="getChartIsolatedIndicator(chart)"
+                                                class="flex flex-1"
+                                                placeholder="Show all"
+                                                @update:model-value="setChartIsolatedIndicator(chart.uuid, $event)"
+                                            >
+                                                <ElOption label="Show all" :value="chartIsolateAll" />
+                                                <ElOption
+                                                    v-for="indicator in chart.indicators"
+                                                    :key="indicator.uuid"
+                                                    :label="getIndicatorName(indicator)"
+                                                    :value="indicator.uuid"
                                                 />
                                             </ElSelect>
                                         </div>
@@ -229,6 +247,8 @@
                                                 @dragleave="onIndicatorDragLeave(chart.uuid, indicatorIndex)"
                                                 @drop.prevent="onIndicatorDrop(chart.uuid, indicatorIndex, $event)"
                                                 @dragend="onIndicatorDragEnd"
+                                                @mouseenter="setIndicatorHighlight(chart.uuid, indicator.typeId)"
+                                                @mouseleave="setIndicatorHighlight(chart.uuid, null)"
                                             >
                                                 <div class="indicator-type flex flex-row flex-1 px-1.5 py-1.5">
                                                     <span
@@ -239,17 +259,81 @@
                                                     >
                                                         <ElIcon><ArrowDown /></ElIcon>
                                                     </span>
+                                                    <ElCheckbox
+                                                        size="small"
+                                                        class="indicator-visibility-toggle ml-2"
+                                                        :model-value="isIndicatorVisible(chart.uuid, indicator)"
+                                                        :title="getIndicatorVisibilityTitle(chart.uuid, indicator)"
+                                                        @click.stop="toggleIndicatorVisibility(chart.uuid, indicator)"
+                                                    ></ElCheckbox>
                                                     <span class="indicator-drag-handle" title="Drag to reorder">⋮⋮</span>
-                                                    <span
-                                                        class="indicator-color-bullet"
-                                                        :class="{ 'is-hidden': !isIndicatorVisible(chart.uuid, indicator) }"
-                                                        :style="{ backgroundColor: getIndicatorColor(chart.uuid, indicator) }"
-                                                        :title="isIndicatorVisible(chart.uuid, indicator) ? `Hide ${indicator.typeId} on the chart` : `Show ${indicator.typeId} on the chart`"
-                                                        @click="toggleIndicatorVisibility(chart.uuid, indicator)"
-                                                    ></span>
-                                                    <div class="indicator-name flex flex-1 ml-1.5" :class="{ 'is-hidden': !isIndicatorVisible(chart.uuid, indicator) }">
-                                                        {{ indicator.typeId }}
+                                                    <div class="indicator-name flex flex-1" :class="{ 'is-hidden': !isIndicatorVisible(chart.uuid, indicator) }">
+                                                        {{ getIndicatorName(indicator) }}
                                                     </div>
+                                                    <span class="indicator-color-bullets px-4">
+                                                        <ElPopover
+                                                            v-for="(color, valueIndex) in getIndicatorColors(indicator)"
+                                                            :key="valueIndex"
+                                                            :ref="(el: any) => setColorPickerRef(indicator.uuid, valueIndex, el)"
+                                                            trigger="click"
+                                                            placement="bottom-start"
+                                                            :width="318"
+                                                            :persistent="false"
+                                                            popper-class="indicator-color-popover"
+                                                            @hide="clearIndicatorColorPreview(chart.uuid, indicator, valueIndex)"
+                                                        >
+                                                            <template #reference>
+                                                                <span
+                                                                    class="indicator-color-bullet"
+                                                                    :class="{ 'is-hidden': !isIndicatorVisible(chart.uuid, indicator) }"
+                                                                    :style="{ backgroundColor: getIndicatorBulletColor(indicator, valueIndex, color) }"
+                                                                    :title="getIndicatorColorTitle(indicator, valueIndex)"
+                                                                ></span>
+                                                            </template>
+
+                                                            <div class="indicator-color-picker">
+                                                                <div class="indicator-color-picker-title">
+                                                                    <span
+                                                                        class="indicator-color-preview-chip"
+                                                                        :style="{ backgroundColor: getIndicatorBulletColor(indicator, valueIndex, color) }"
+                                                                    ></span>
+                                                                    <span class="indicator-color-picker-label">
+                                                                        {{ getIndicatorValueLabel(indicator, valueIndex) }}
+                                                                    </span>
+                                                                    <span class="indicator-color-preview-hex">
+                                                                        {{ getIndicatorBulletColor(indicator, valueIndex, color) }}
+                                                                    </span>
+                                                                </div>
+
+                                                                <div class="indicator-color-swatches row flex-wrap gap-2">
+                                                                    <span
+                                                                        v-for="swatch in indicatorPalette"
+                                                                        :key="swatch"
+                                                                        class="indicator-color-swatch col-0"
+                                                                        :class="{ 'is-selected': swatch.toLowerCase() === color.toLowerCase() }"
+                                                                        :style="{ backgroundColor: swatch }"
+                                                                        :title="swatch"
+                                                                        @mouseenter="previewIndicatorColor(chart.uuid, indicator, valueIndex, swatch)"
+                                                                        @mouseleave="clearIndicatorColorPreview(chart.uuid, indicator, valueIndex)"
+                                                                        @focus="previewIndicatorColor(chart.uuid, indicator, valueIndex, swatch)"
+                                                                        @blur="clearIndicatorColorPreview(chart.uuid, indicator, valueIndex)"
+                                                                        @click="setIndicatorColor(chart.uuid, indicator, valueIndex, swatch)"
+                                                                    ></span>
+                                                                </div>
+
+                                                                <div class="indicator-color-custom">
+                                                                    <span class="indicator-color-custom-label">Custom</span>
+                                                                    <ElColorPicker
+                                                                        :model-value="color"
+                                                                        size="small"
+                                                                        :teleported="false"
+                                                                        :predefine="indicatorPalette"
+                                                                        @change="setIndicatorColor(chart.uuid, indicator, valueIndex, $event)"
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                        </ElPopover>
+                                                    </span>
                                                     <ElButton type="danger" circle icon size="small" @click="removeIndicator(chart.uuid, indicator.uuid)">
                                                         <ElIcon>
                                                             <Delete />
@@ -264,6 +348,16 @@
                                                 >
                                                     <div class="indicator-config-inner">
                                                         <div class="indicator-config p-3">
+                                                            <div class="attribute indicator-name-input">
+                                                                <div class="attribute-label">Name</div>
+                                                                <div class="attribute-value">
+                                                                    <ElInput
+                                                                        v-model="indicator.name"
+                                                                        :placeholder="indicator.typeId"
+                                                                        @input="applyIndicatorNames(chart.uuid)"
+                                                                    />
+                                                                </div>
+                                                            </div>
                                                             <div class="attribute indicator-timeframe">
                                                                 <div class="attribute-label">Time-frame</div>
                                                                 <div class="attribute-value">
@@ -279,6 +373,26 @@
                                                                             :key="timeframe.id"
                                                                             :label="timeframe.label"
                                                                             :value="timeframe.id"
+                                                                        />
+                                                                    </ElSelect>
+                                                                </div>
+                                                            </div>
+                                                            <div class="attribute indicator-timeframe">
+                                                                <div class="attribute-label">Data source</div>
+                                                                <div class="attribute-value">
+                                                                    <ElSelect
+                                                                        :model-value="getIndicatorSource(chart, indicator)"
+                                                                        class="flex flex-1"
+                                                                        placeholder="Time-frame"
+                                                                        :disabled="getIndicatorSourceOptions(chart, indicator).length === 0"
+                                                                        @update:model-value="setIndicatorSource(chart.uuid, indicator.uuid, $event)"
+                                                                    >
+                                                                        <ElOption label="Time-frame" :value="indicatorSourceTimeframe" />
+                                                                        <ElOption
+                                                                            v-for="candidate in getIndicatorSourceOptions(chart, indicator)"
+                                                                            :key="candidate.uuid"
+                                                                            :label="getIndicatorName(candidate)"
+                                                                            :value="candidate.uuid"
                                                                         />
                                                                     </ElSelect>
                                                                 </div>
@@ -385,13 +499,14 @@
 
     import { AppLocalStateChart } from "./api/data/AppLocalState";
     import { Chart } from "./api/rendering/objects/Chart";
+    import { Runner } from "./api/tester/Runner";
     import VMenu from './components/menu/VMenu.vue';
     import VMenuGroup from './components/menu/VMenuGroup.vue';
     import VMenuItem from './components/menu/VMenuItem.vue';
     import VCanvas3D from './components/rendering/VCanvas3D.vue';
     import VOPFSExplorer from './components/data/opfs/VOPFSExplorer.vue';
     import VTicksUpload from './components/data/VTicksUpload.vue';
-    import { ElDivider, ElIcon } from "element-plus";
+    import { ElDivider, ElIcon, ElPopover, ElColorPicker } from "element-plus";
     import VPopUp from "./components/menu/VPopUp.vue";
     import { type ComponentInstance } from "vue";
     import { markRaw } from "vue";
@@ -403,6 +518,7 @@
     import { NotFound } from "./api/Throwables";
     import { listAppProjects, loadAppProject, normalizeAppProjectName, saveAppProject, renameAppProject, deleteAppProject, type AppProjectInfo } from "./api/data/AppProjects";
     import { APP_TIMEFRAMES, normalizeAppTimeframe, type AppTimeframe } from "./api/data/AppTimeframes";
+    import { INDICATOR_PALETTE, getIndicatorColorCount, getIndicatorValueTitles, randomIndicatorColors, resolveIndicatorColors } from "./api/data/IndicatorColors";
 
     /**
      * Delay (in milliseconds) used to coalesce bursts of OPFS changes into a single tick source
@@ -415,6 +531,15 @@
      * time-frame. It is never stored in the roaming state.
      */
     const INDICATOR_TIMEFRAME_CHART = 'chart';
+
+    /** Value of the indicator's data source selector that selects the time-frame indicator. */
+    const INDICATOR_SOURCE_TIMEFRAME = 'timeframe';
+
+    /**
+     * Value of the chart's "Isolate" selector that shows every indicator. It is never stored in the
+     * roaming state — the selector stores the isolated indicator's UUID instead.
+     */
+    const CHART_ISOLATE_ALL = 'all';
     
     @Component({
         components: {
@@ -425,7 +550,9 @@
             VMenuItem,
             VMenuGroup,
             VPopUp,
-            JsonTreeView
+            JsonTreeView,
+            ElPopover,
+            ElColorPicker
         }
     })
     export class VApp extends Vue
@@ -436,6 +563,26 @@
         canvas!: ComponentInstance<typeof VCanvas3D>;
 
         public charts: Chart[] = [];
+
+        /** Palette offered by the color picker of the indicator bullets. */
+        public indicatorPalette: readonly string[] = INDICATOR_PALETTE;
+
+        /**
+         * Color picker popovers of the indicator bullets, keyed by `<indicator uuid>:<value index>`.
+         *
+         * Kept so a picker can be closed once the user picked a color. `markRaw` keeps Vue from
+         * proxying the component instances stored here.
+         */
+        private colorPickerRefs: Record<string, { hide?: () => void }> = markRaw({});
+
+        /**
+         * Color currently previewed by hovering a swatch, keyed by `<indicator uuid>:<value index>`.
+         *
+         * Hovering a swatch paints the indicator's bullet (and the chip in the popover) with that
+         * color, so the user can judge it against the chart before committing. The entry is removed
+         * when the pointer leaves the swatch or the popover closes.
+         */
+        public indicatorColorPreviews: Record<string, string> = {};
 
         /**
          * Name of the tab currently shown in the right-hand side panel.
@@ -453,6 +600,14 @@
 
         /** Number of chart runs currently in progress. */
         public runningChartCount: number = 0;
+
+        /**
+         * Value of the chart's "Isolate" selector that shows every indicator.
+         *
+         * The selector stores the UUID of the isolated indicator, so this sentinel stands for "no
+         * isolation" and is never persisted.
+         */
+        public chartIsolateAll: string = CHART_ISOLATE_ALL;
 
         get isChartRunning(): boolean {
             return this.runningChartCount > 0;
@@ -479,6 +634,12 @@
 
         /** Value of the indicator's time-frame selector meaning "Same as chart". */
         public indicatorTimeframeChart: string = INDICATOR_TIMEFRAME_CHART;
+
+        /** Value of the indicator's data source selector meaning "the time-frame indicator". */
+        public indicatorSourceTimeframe: string = INDICATOR_SOURCE_TIMEFRAME;
+
+        /** Incremented once the wasm module used for source compatibility checks is ready. */
+        public compatibilityVersion: number = 0;
 
         /** Unregisters the OPFS change listener, or `null` when not subscribed. */
         private unsubscribeFromOPFS: (() => void) | null = null;
@@ -556,7 +717,7 @@
                     typeId: 'OHLC',
                     config: JSON.parse(JSON.stringify(ohlc?.defaultConfig ?? {})),
                     visible: true,
-                    color: Series.formatColor(Series.getSeriesColor(0))
+                    colors: randomIndicatorColors(getIndicatorColorCount('OHLC'))
                 }]
             }]);
             this.$roamingState.projectName = null;
@@ -676,6 +837,10 @@
             this.unsubscribeFromOPFS = opfs.onChange(() => this.scheduleTickSourcesRefresh());
 
             this.refreshProjects();
+
+            Runner.loadCompatibilityLibrary()
+                .then(() => this.compatibilityVersion++)
+                .catch(error => console.error('Failed to load the indicator compatibility library.', error));
 
             // Keeps the overlay up while tick sources load, before the first chart run starts.
             this.runningChartCount++;
@@ -805,6 +970,62 @@
         }
 
         /**
+         * Returns the value the chart's "Isolate" selector should show.
+         *
+         * The isolated indicator is stored by UUID, so a stale UUID (the indicator was removed)
+         * falls back to "Show all" instead of leaving the selector blank.
+         */
+        public getChartIsolatedIndicator(chart: { isolatedIndicator?: string | null; indicators: { uuid: string }[] }): string {
+            const uuid = chart.isolatedIndicator;
+
+            if (!uuid || !chart.indicators.some(indicator => indicator.uuid === uuid))
+                return CHART_ISOLATE_ALL;
+
+            return uuid;
+        }
+
+        /**
+         * Isolates one of the chart's indicators, or shows them all again.
+         *
+         * The isolated indicator keeps full opacity while every other indicator is faded, the same
+         * way the hover highlight fades them. Unlike the hover highlight it persists, so it is
+         * stored in the roaming state.
+         *
+         * @param chartId UUID of the chart to configure.
+         * @param indicatorId UUID of the indicator to isolate, or `CHART_ISOLATE_ALL`.
+         */
+        public setChartIsolatedIndicator(chartId: string, indicatorId: string | null): void {
+            const chartConfig = this.$roamingState.charts.find(chart => chart.uuid === chartId);
+
+            if (!chartConfig)
+                return;
+
+            chartConfig.isolatedIndicator = !indicatorId || indicatorId === CHART_ISOLATE_ALL
+                ? null
+                : indicatorId;
+
+            this.applyChartIsolation(chartId);
+        }
+
+        /**
+         * Pushes the chart's persisted isolation to its series.
+         *
+         * The isolated indicator is resolved to its type id, because the series are matched by the
+         * indicator type they were built from rather than by the roaming state's UUID.
+         */
+        private applyChartIsolation(chartId: string): void {
+            const chartConfig = this.$roamingState.charts.find(chart => chart.uuid === chartId);
+            const chart = this.$localState.charts[chartId]?.threejs.chart;
+
+            if (!chartConfig || !chart)
+                return;
+
+            const isolated = chartConfig.indicators.find(indicator => indicator.uuid === chartConfig.isolatedIndicator);
+
+            chart.setSeriesIsolated(isolated?.typeId ?? null);
+        }
+
+        /**
          * Sets the chart's time-frame and re-runs it, so its bars are rebuilt on the new one.
          *
          * Indicators that follow the chart ("Same as chart") move along with it.
@@ -832,7 +1053,6 @@
         public getIndicatorTimeframe(indicator: { timeframe?: string }): string {
             return indicator.timeframe ?? INDICATOR_TIMEFRAME_CHART;
         }
-
         /**
          * Sets the indicator's time-frame and re-runs the chart, so the indicator is recalculated
          * on it.
@@ -853,6 +1073,103 @@
             indicator.timeframe = timeframe && timeframe !== INDICATOR_TIMEFRAME_CHART
                 ? normalizeAppTimeframe(timeframe)
                 : undefined;
+
+            await this.runChart(chartId);
+        }
+
+        /**
+         * Returns the name shown for the indicator, which is its type id until it is renamed.
+         */
+        public getIndicatorName(indicator: { typeId: string; name?: string }): string {
+            return indicator.name?.trim() || indicator.typeId;
+        }
+
+        /**
+         * Pushes the chart's indicator names to the chart, so its popups show them.
+         *
+         * Series are matched by indicator type, so the first indicator of a type provides the name.
+         */
+        public applyIndicatorNames(chartId: string): void {
+            const chartConfig = this.$roamingState.charts.find(chart => chart.uuid === chartId);
+            const chart = this.$localState.charts[chartId]?.threejs.chart;
+
+            if (!chartConfig || !chart)
+                return;
+
+            const names: Record<string, string> = {};
+
+            for (const indicator of chartConfig.indicators)
+                names[indicator.typeId] ??= this.getIndicatorName(indicator);
+
+            chart.setIndicatorNames(names);
+        }
+
+        /**
+         * Returns the indicators of the chart the given indicator may run over.
+         *
+         * An indicator never runs over itself or over an indicator that (directly or not) runs over
+         * it, and the candidate has to be accepted by the library's compatibility check.
+         */
+        public getIndicatorSourceOptions(
+            chart: { uuid: string; indicators: { uuid: string; typeId: string; name?: string; source?: string }[] },
+            indicator: { uuid: string; typeId: string }
+        ): { uuid: string; typeId: string; name?: string }[] {
+            // Re-evaluated once the compatibility library has loaded.
+            void this.compatibilityVersion;
+
+            const runner = this.$localState.charts[chart.uuid]?.runner;
+
+            if (!runner)
+                return [];
+
+            const dependsOnIndicator = (candidate: { uuid: string; source?: string }): boolean => {
+                const visited = new Set<string>();
+                let current: { uuid: string; source?: string } | undefined = candidate;
+
+                while (current && !visited.has(current.uuid)) {
+                    if (current.uuid === indicator.uuid)
+                        return true;
+
+                    visited.add(current.uuid);
+                    current = chart.indicators.find(other => other.uuid === current!.source);
+                }
+
+                return false;
+            };
+
+            return chart.indicators.filter(candidate =>
+                candidate.uuid !== indicator.uuid
+                && !dependsOnIndicator(candidate)
+                && runner.checkIndicatorSourceCompatibility(indicator.typeId, candidate.typeId)
+            );
+        }
+
+        /**
+         * Returns the value the indicator's "Data source" selector should show.
+         */
+        public getIndicatorSource(
+            chart: { uuid: string; indicators: { uuid: string; typeId: string; name?: string; source?: string }[] },
+            indicator: { uuid: string; typeId: string; source?: string }
+        ): string {
+            const isOffered = this.getIndicatorSourceOptions(chart, indicator).some(candidate => candidate.uuid === indicator.source);
+
+            return indicator.source && isOffered ? indicator.source : INDICATOR_SOURCE_TIMEFRAME;
+        }
+
+        /**
+         * Sets the indicator the given indicator runs over and re-runs the chart.
+         *
+         * @param indicatorId UUID of the indicator to configure.
+         * @param source UUID of the data source indicator, or the time-frame sentinel.
+         */
+        public async setIndicatorSource(chartId: string, indicatorId: string, source: string | null): Promise<void> {
+            const chart = this.$roamingState.charts.find(chart => chart.uuid === chartId);
+            const indicator = chart?.indicators.find(indicator => indicator.uuid === indicatorId);
+
+            if (!chart || !indicator)
+                return;
+
+            indicator.source = source && source !== INDICATOR_SOURCE_TIMEFRAME ? source : undefined;
 
             await this.runChart(chartId);
         }
@@ -977,13 +1294,17 @@
         public addIndicator(chartId: string, indicatorTypeId: string, config?: any): void {
             const chart = this.$roamingState.charts.find(chart => chart.uuid === chartId);
             if (chart) {
+                // Colors already taken by the chart's other indicators, so the new one stands out.
+                const usedColors = chart.indicators.flatMap(indicator => this.getIndicatorColors(indicator));
+
                 chart.indicators.push({
-                    uuid: `indicator${chart.indicators.length}`,
+                    uuid: crypto.randomUUID(),
                     typeId: indicatorTypeId,
+                    name: indicatorTypeId,
                     config: config ?? JSON.parse(JSON.stringify(this.$settings.indicators.find(ind => ind.typeId === indicatorTypeId)?.defaultConfig)),
                     visible: true,
-                    // Assign the next palette color so it stays with the indicator when reordered.
-                    color: Series.formatColor(Series.getSeriesColor(chart.indicators.length))
+                    // One random color per value, so every line of the indicator is distinct.
+                    colors: randomIndicatorColors(getIndicatorColorCount(indicatorTypeId), usedColors)
                 });
             }
         }
@@ -992,6 +1313,19 @@
             const chart = this.$roamingState.charts.find(chart => chart.uuid === chartId);
             if (chart) {
                 chart.indicators = chart.indicators.filter(indicator => indicator.uuid !== indicatorId);
+
+                // Indicators that ran over the removed one go back to the time-frame indicator.
+                for (const indicator of chart.indicators) {
+                    if (indicator.source === indicatorId)
+                        indicator.source = undefined;
+                }
+
+                // The isolated indicator may be the one that was just removed, so drop the stale
+                // isolation instead of leaving the chart dimmed with nothing highlighted.
+                if (chart.isolatedIndicator === indicatorId) {
+                    chart.isolatedIndicator = null;
+                    this.applyChartIsolation(chartId);
+                }
             }
         }
 
@@ -1015,6 +1349,10 @@
                 .then(() => {
                     // Apply the persisted per-indicator visibility to the freshly created series.
                     this.applyIndicatorVisibility(chartId);
+
+                    // Re-apply the persisted isolation, so a re-run does not clear it.
+                    this.applyChartIsolation(chartId);
+                    this.applyIndicatorNames(chartId);
 
                     // Charts are markRaw, so bump a reactive counter to refresh the indicator color bullets.
                     this.chartRunVersion++;
@@ -1050,22 +1388,161 @@
         }
 
         /**
-         * Returns the CSS color the given indicator is drawn with on the chart.
+         * Returns the CSS colors the given indicator's values are drawn with on the chart.
          *
-         * The color is stored per indicator, so it stays the same when the list is reordered.
-         * Falls back to the palette color derived from the indicator's position.
+         * There is one color per value the indicator emits, so a multi-value indicator (e.g.
+         * Bands' Base/Upper/Lower) shows one bullet per line. The colors are stored per indicator,
+         * so they stay the same when the list is reordered.
+         *
+         * This is called from the template, so it must not modify the roaming state; indicators
+         * saved before per-value colors existed are migrated when the state is loaded instead.
          */
-        public getIndicatorColor(chartId: string, indicator: { typeId: string; color?: string }): string {
-            // Establishes a reactive dependency so the bullet refreshes after a chart run.
+        public getIndicatorColors(indicator: { typeId: string; colors?: string[]; color?: string }): string[] {
+            // Establishes a reactive dependency so the bullets refresh after a chart run.
             void this.chartRunVersion;
 
-            if (indicator.color)
-                return indicator.color;
+            return resolveIndicatorColors(indicator);
+        }
 
-            const chartConfig = this.$roamingState.charts.find(chart => chart.uuid === chartId);
-            const index = chartConfig ? chartConfig.indicators.indexOf(indicator as any) : -1;
+        /**
+         * Human readable name of the given value of an indicator, e.g. "Upper" for Bands.
+         *
+         * Values without a configured title fall back to "Value N". Indicators that only have a
+         * single color (single-value ones and candlestick ones like OHLC) are simply named after
+         * the indicator, because their bullet stands for the whole indicator.
+         */
+        public getIndicatorValueLabel(indicator: { typeId: string }, valueIndex: number): string {
+            if (getIndicatorColorCount(indicator.typeId) <= 1)
+                return indicator.typeId;
 
-            return Series.formatColor(Series.getSeriesColor(Math.max(0, index)));
+            const title = getIndicatorValueTitles(indicator.typeId)[valueIndex];
+
+            return title || `Value ${valueIndex + 1}`;
+        }
+
+        /**
+         * Tooltip of a color bullet: what the value is called and what clicking does.
+         */
+        public getIndicatorColorTitle(indicator: { typeId: string }, valueIndex: number): string {
+            const label = this.getIndicatorValueLabel(indicator, valueIndex);
+
+            return `${label} — Click to change the color`;
+        }
+
+        /**
+         * Tooltip of the on/off sphere: what clicking it does to the indicator's visibility.
+         */
+        public getIndicatorVisibilityTitle(chartId: string, indicator: { visible?: boolean }): string {
+            return this.isIndicatorVisible(chartId, indicator)
+                ? 'Hide this indicator'
+                : 'Show this indicator';
+        }
+
+        /**
+         * Sets the color of a single value of the given indicator and redraws the chart.
+         *
+         * The color is stored in the roaming state, so it is persisted and can be undone.
+         */
+        public setIndicatorColor(
+            chartId: string,
+            indicator: { uuid: string; typeId: string; colors?: string[]; color?: string },
+            valueIndex: number,
+            color: string | null
+        ): void {
+            if (!color)
+                return;
+
+            const colors = [...this.getIndicatorColors(indicator)];
+            colors[valueIndex] = color;
+
+            indicator.colors = colors;
+            delete indicator.color;
+
+            this.clearIndicatorColorPreview(chartId, indicator, valueIndex);
+            this.applyIndicatorVisibility(chartId);
+
+            // The picker has done its job, so it should not stay open over the chart.
+            this.colorPickerRefs[`${indicator.uuid}:${valueIndex}`]?.hide?.();
+        }
+
+        /**
+         * Color the bullet of the given value should be painted with.
+         *
+         * While the user hovers a swatch this is the hovered color, so the bullet previews the
+         * change; otherwise it is the color stored in the roaming state.
+         */
+        public getIndicatorBulletColor(
+            indicator: { uuid: string },
+            valueIndex: number,
+            color: string
+        ): string {
+            return this.indicatorColorPreviews[`${indicator.uuid}:${valueIndex}`] ?? color;
+        }
+
+        /**
+         * Previews `color` on the given value of the indicator, without storing it.
+         *
+         * The preview is applied to the chart as well as to the bullet, so hovering a swatch shows
+         * the line or bar in the candidate color before the user commits to it.
+         */
+        public previewIndicatorColor(
+            chartId: string,
+            indicator: { uuid: string; typeId: string; colors?: string[]; color?: string },
+            valueIndex: number,
+            color: string
+        ): void {
+            this.indicatorColorPreviews[`${indicator.uuid}:${valueIndex}`] = color;
+            this.applyIndicatorColorPreview(chartId, indicator);
+        }
+
+        /** Stops previewing the color of the given value, restoring the stored one. */
+        public clearIndicatorColorPreview(
+            chartId: string,
+            indicator: { uuid: string; typeId: string; colors?: string[]; color?: string },
+            valueIndex: number
+        ): void {
+            const key = `${indicator.uuid}:${valueIndex}`;
+
+            if (!(key in this.indicatorColorPreviews))
+                return;
+
+            delete this.indicatorColorPreviews[key];
+            this.applyIndicatorColorPreview(chartId, indicator);
+        }
+
+        /**
+         * Pushes the indicator's colors to its series, substituting the previewed values.
+         *
+         * Only the given indicator is touched, so previewing a color does not disturb the other
+         * indicators of the chart.
+         */
+        private applyIndicatorColorPreview(
+            chartId: string,
+            indicator: { uuid: string; typeId: string; colors?: string[]; color?: string }
+        ): void {
+            const chart = this.$localState.charts[chartId]?.threejs.chart;
+
+            if (!chart)
+                return;
+
+            const colors = this.getIndicatorColors(indicator).map((color, index) =>
+                this.indicatorColorPreviews[`${indicator.uuid}:${index}`] ?? color
+            );
+
+            chart.setSeriesColors(indicator.typeId, colors.map(color => Series.parseColor(color)));
+        }
+
+        /**
+         * Keeps a reference to the color picker popover of a single value of an indicator, so it
+         * can be closed once a color has been picked.
+         */
+        public setColorPickerRef(indicatorId: string, valueIndex: number, instance: any): void {
+            const key = `${indicatorId}:${valueIndex}`;
+
+            if (instance)
+                this.colorPickerRefs[key] = instance;
+            else
+                delete this.colorPickerRefs[key];
         }
 
         /**
@@ -1092,7 +1569,7 @@
         }
 
         /**
-         * Pushes the persisted visibility and color of every indicator of the chart to its series.
+         * Pushes the persisted visibility and colors of every indicator of the chart to its series.
          */
         private applyIndicatorVisibility(chartId: string): void {
             const chartConfig = this.$roamingState.charts.find(chart => chart.uuid === chartId);
@@ -1103,7 +1580,10 @@
 
             for (const indicator of chartConfig.indicators) {
                 chart.setSeriesVisible(indicator.typeId, indicator.visible !== false);
-                chart.setSeriesColor(indicator.typeId, Series.parseColor(indicator.color));
+                chart.setSeriesColors(
+                    indicator.typeId,
+                    this.getIndicatorColors(indicator).map(color => Series.parseColor(color))
+                );
             }
         }
 
@@ -1181,6 +1661,22 @@
          */
         public toggleIndicatorCollapsed(indicator: { collapsed?: boolean }): void {
             indicator.collapsed = !this.isIndicatorCollapsed(indicator);
+        }
+
+        /**
+         * Highlights the given indicator while the user hovers its settings panel.
+         *
+         * The hovered indicator keeps full opacity while every other indicator of the chart is
+         * faded, so the lines and bars being configured stand out from the rest of the chart.
+         * Passing `null` restores every indicator to full opacity.
+         */
+        public setIndicatorHighlight(chartId: string, typeId: string | null): void {
+            const chart = this.$localState.charts[chartId]?.threejs.chart;
+
+            if (!chart)
+                return;
+
+            chart.setSeriesDimmed(typeId);
         }
 
         /**
@@ -1321,15 +1817,24 @@
         border-bottom: 1px solid #292929;
     }
 
+    .indicator-color-bullets {
+        display: inline-flex;
+        flex: 0 0 auto;
+        flex-direction: row;
+        align-items: center;
+        align-self: center;
+        gap: 4px;
+        margin-right: 4px;
+    }
+
     .indicator-color-bullet {
         display: inline-block;
         flex: 0 0 auto;
         align-self: center;
-        width: 10px;
-        height: 10px;
+        width: 14px;
+        height: 14px;
         border-radius: 50%;
         margin-left: 2px;
-        margin-right: 4px;
         margin-top: 2px;
         box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
         cursor: pointer;
@@ -1339,10 +1844,10 @@
             box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.6);
         }
 
-        // Hidden indicators keep their color but are dimmed and hollowed out.
+        // Hidden indicators keep their color but are dimmed, so the on/off sphere stays the
+        // single control for visibility.
         &.is-hidden {
-            opacity: 0.3;
-            box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25), inset 0 0 0 2px #111;
+            opacity: 0.35;
         }
     }
 
@@ -1359,6 +1864,10 @@
         &.is-drop-target {
             border-color: #4caf50;
             box-shadow: 0 0 0 1px #4caf50;
+        }
+
+        &:hover {
+            border-color: #4caf50;
         }
     }
 
@@ -1424,6 +1933,128 @@
     // component, so it needs its own spacing to the fields below it.
     .indicator-timeframe {
         margin-bottom: 1rem;
+    }
+
+</style>
+
+
+<!-- STYLE: color picker popover -->
+
+<!--
+    The popover is teleported to the body, so its styles cannot be scoped to this component.
+-->
+<style lang="scss">
+
+    .indicator-color-popover.el-popover.el-popper {
+        padding: 8px;
+        background-color: #1b1b1b;
+        border: 1px solid #333;
+        color: #ccc;
+    }
+
+    .indicator-color-picker {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .indicator-color-picker-title {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        font-weight: 700;
+        color: #ddd;
+    }
+
+    .indicator-color-picker-label {
+        flex: 1;
+    }
+
+    // Shows the color the pointer is over, so the user can judge it before committing.
+    .indicator-color-preview-chip {
+        display: block;
+        flex: 0 0 auto;
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+        transition: background-color 0.1s ease;
+    }
+
+    .indicator-color-preview-hex {
+        flex: 0 0 auto;
+        font-family: monospace;
+        font-size: 11px;
+        font-weight: 400;
+        color: #888;
+    }
+
+    .indicator-color-swatch {
+        display: block;
+        width: 20px;
+        height: 20px;
+        border-radius: 4px;
+        cursor: pointer;
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2);
+        transition: transform 0.1s ease, box-shadow 0.1s ease;
+
+        &:hover {
+            transform: scale(1.12);
+            box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.7);
+        }
+
+        &.is-selected {
+            box-shadow: 0 0 0 2px #fff;
+        }
+    }
+
+    .indicator-color-custom {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding-top: 4px;
+        border-top: 1px solid #2c2c2c;
+    }
+
+    .indicator-color-custom-label {
+        font-size: 12px;
+        color: #888;
+    }
+
+    // The picker's panel is normally positioned by a popper, which does not work inside another
+    // popper. Making it static lets it flow below the swatches and grow the popover instead.
+    .indicator-color-popover .el-color-picker__panel {
+        position: static !important;
+        inset: auto !important;
+        flex: 0 0 100%;
+        margin-top: 4px;
+        border: 1px solid #333;
+        box-shadow: none;
+    }
+
+</style>
+
+<style lang="scss">
+
+    .indicator-visibility-toggle {
+        .el-checkbox__input {
+            .el-checkbox__inner {
+                width: 16px !important;
+                height: 16px !important;
+            }
+        }
+
+        &.is-checked {
+            .el-checkbox__inner {
+                background-color: #1e4a27 !important;
+                border-color: #40a17f !important;
+            }
+        }
     }
 
 </style>

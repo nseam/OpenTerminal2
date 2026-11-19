@@ -104,6 +104,12 @@ export class CameraMovement extends RendererPlugin<CameraMovementOptions>
         if (!renderPass?.activeScene?.activeCamera)
             return;
 
+        // Keyboard movement is a canvas operation, so it must not keep flying the camera while the
+        // pointer is over another part of the page. The pressed keys are kept, so movement resumes
+        // as soon as the pointer is back over the canvas.
+        if (!this.renderer.isPointerOver)
+            return;
+
         const camera = renderPass.activeScene.activeCamera;
         const dir = new Gfx.Vector3();
 
@@ -188,6 +194,14 @@ export class CameraMovement extends RendererPlugin<CameraMovementOptions>
         const camera = this.camera;
         if (!camera)
             return;
+
+        // Mouse movement is tracked on the window so a drag keeps working when the cursor briefly
+        // leaves the canvas, but the camera must only react while the pointer is over the canvas.
+        if (!this.renderer.isPointerOver) {
+            this.isDragging = false;
+            this.isPanning = false;
+            return;
+        }
 
         // Middle mouse button held: pan camera in world-aligned X/Y axes.
         if (this.options?.enablePanning && e.buttons & 4) {

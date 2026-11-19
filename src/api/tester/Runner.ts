@@ -50,6 +50,99 @@ export class Runner extends Test {
         return this.pendingRun;
     }
 
+    /**
+     * Creates an indicator from its type id and saved config.
+     *
+     * Cleared number inputs and stale saved configs leave null/undefined values, which the WASM
+     * constructors reject, so they are replaced by the type's defaults.
+     */
+    private static instantiate(lib: LibModule, typeId: string, savedConfig: Record<string, unknown>): IndicatorBase {
+        const indicatorType = AppStaticSettings.indicators.find(ind => ind.typeId === typeId);
+
+        const config: Record<string, unknown> = { ...savedConfig };
+        for (const [key, fallback] of Object.entries(indicatorType?.defaultConfig ?? {})) {
+            if (config[key] === null || config[key] === undefined)
+                config[key] = fallback;
+        }
+
+        return indicatorType!.factory(lib, config);
+    }
+
+    /** Library instance used only for source compatibility checks, shared by every runner. */
+    private static compatibilityLib?: Promise<LibModule>;
+
+    private static compatibilityCache = new Map<string, boolean>();
+
+    /**
+     * Loads the wasm module used by `checkIndicatorSourceCompatibility()`.
+     *
+     * The check has to work before a chart has ever been run, so it does not borrow the module of
+     * a run (those are created and torn down per run).
+     */
+    public static loadCompatibilityLibrary(): Promise<LibModule> {
+        Runner.compatibilityLib ??= new Promise<LibModule>((resolve, reject) => {
+            const probe = new class extends Test {
+                run(lib: LibModule): void {
+                    lib.Tester.Init();
+                    Runner.compatibilityLibSync = lib;
+                    resolve(lib);
+                }
+            }();
+
+            run(Runner, createModule, 'node_modules/fx31337-wasm/dist/IndicatorTest.wasm', probe).catch(reject);
+        });
+
+        return Runner.compatibilityLib;
+    }
+
+    /**
+     * Tells whether an indicator of `parentIndicatorTypeId` can be the data source of an
+     * indicator of `indicatorTypeId`.
+     *
+     * Both are instantiated with their default config and asked through
+     * `Tester.OnCheckIfSuitableDataSource()`. Returns `false` until
+     * `loadCompatibilityLibrary()` has resolved.
+     */
+    public checkIndicatorSourceCompatibility(indicatorTypeId: string, parentIndicatorTypeId: string): boolean {
+        const key = `${indicatorTypeId}<-${parentIndicatorTypeId}`;
+        const cached = Runner.compatibilityCache.get(key);
+
+        if (cached !== undefined)
+            return cached;
+
+        const lib = Runner.compatibilityLibSync;
+
+        if (!lib)
+            return false;
+
+        const created: { delete(): void }[] = [];
+        let suitable = false;
+
+        try {
+            const indicator = Runner.instantiate(lib, indicatorTypeId, {});
+            created.push(indicator);
+            const parent = Runner.instantiate(lib, parentIndicatorTypeId, {});
+            created.push(parent);
+
+            suitable = lib.Tester.OnCheckIfSuitableDataSource(indicator as any, parent as any);
+
+            console.log(`Indicator source compatibility for ${key}: ${suitable}`);
+        }
+        catch (error) {
+            console.warn(`Failed to check whether ${parentIndicatorTypeId} can be a source of ${indicatorTypeId}.`, error);
+        }
+        finally {
+            for (const object of created.reverse())
+                object.delete();
+        }
+
+        Runner.compatibilityCache.set(key, suitable);
+
+        return suitable;
+    }
+
+    private static compatibilityLibSync?: LibModule;
+
     private async execute(lib: LibModule): Promise<any> {
         lib.Tester.Init();
 
@@ -93,25 +186,48 @@ export class Runner extends Test {
                 return timeframe;
             };
 
-            this.chartConfig.indicators.forEach(indicatorConfig => {
-                const indicatorType = AppStaticSettings.indicators.find(ind => ind.typeId === indicatorConfig.typeId);
-                const indicatorFactory = indicatorType?.factory;
+            const configs = this.chartConfig.indicators;
+            const instances = new Map<string, IndicatorBase>();
+            const building = new Set<string>();
 
-                // Cleared number inputs and stale saved configs leave null/undefined values, which the WASM constructors reject.
-                const config: Record<string, unknown> = { ...indicatorConfig.config };
-                for (const [key, fallback] of Object.entries(indicatorType?.defaultConfig ?? {})) {
-                    if (config[key] === null || config[key] === undefined)
-                        config[key] = fallback;
-                }
+            // A data source has to be instantiated before the indicators that run over it, so
+            // indicators are built recursively, parent first.
+            const build = (indicatorConfig: AppRoamingStateChart['indicators'][number]): IndicatorBase => {
+                const existing = instances.get(indicatorConfig.uuid);
+
+                if (existing)
+                    return existing;
+
+                building.add(indicatorConfig.uuid);
 
                 // An indicator without its own time-frame follows the chart ("Same as chart").
                 const indicatorTimeframe = resolveAppTimeframe(this.chartConfig.timeframe, indicatorConfig.timeframe);
 
-                const indicator = track((indicatorFactory!)(lib, config));
+                const indicator = track(Runner.instantiate(lib, indicatorConfig.typeId, indicatorConfig.config));
                 indicator.SetName(indicatorConfig.typeId);
-                indicator.SetSource(getTimeframe(indicatorTimeframe));
-                lib.Tester.Add(indicator);
-            });
+
+                // Indicators start out named after their type.
+                if (!indicatorConfig.name?.trim())
+                    indicatorConfig.name = indicatorConfig.typeId;
+
+                // A missing parent or a cycle falls back to the time-frame indicator.
+                const parentConfig = indicatorConfig.source
+                    ? configs.find(candidate => candidate.uuid === indicatorConfig.source)
+                    : undefined;
+
+                if (parentConfig && parentConfig !== indicatorConfig && !building.has(parentConfig.uuid))
+                    indicator.SetSource(build(parentConfig));
+                else
+                    indicator.SetSource(getTimeframe(indicatorTimeframe));
+
+                building.delete(indicatorConfig.uuid);
+                instances.set(indicatorConfig.uuid, indicator);
+
+                return indicator;
+            };
+
+            // Tester.Add() is called in the configured order, so the series order stays the same.
+            configs.forEach(indicatorConfig => lib.Tester.Add(build(indicatorConfig)));
 
             await this.feedTicks(lib, ticker, tickSource?.path);
 

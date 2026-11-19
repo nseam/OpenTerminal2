@@ -23,7 +23,8 @@ export interface ChartObjectManipulatorOptions {
  * - Alt + Left Mouse Button for orbit-style rotation.
  * - Middle Mouse Button for panning in world-aligned X/Y axes.
  * - Alt + Both Mouse Buttons for orbit-style panning in camera local space.
- * - Mouse Wheel for zooming in/out.
+ * - Left Mouse Button drag for scrolling the chart horizontally and vertically.
+ * - Mouse Wheel for zooming the chart in/out around the cursor.
  */
 @Known.class('BuiltIn.ChartObjectManipulator')
 export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulatorOptions>
@@ -51,9 +52,6 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
 
     // Whether the mouse is currently being dragged for chart scrolling.
     private isScrolling = false;
-
-    // Accumulated horizontal scroll velocity for smooth mouse-wheel deceleration.
-    private _scrollVelocity: number = 0;
 
     // Vector2 cache.
     private _cacheVector2: Gfx.Vector2 = new Gfx.Vector2();
@@ -101,7 +99,8 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
 
         if (this.options.chart) {
             this.options.chart.onDataSet = () => {
-                this.options.chart.numBarsVisible = Math.floor(this.options.chart.numInitialBars / this.options.chart.zoom);
+                // The zoom setter keeps `numBarsVisible` in sync with the zoom level, so new data
+                // only needs the camera re-centred.
                 this.centerCameraOnChart();
             }
         }
@@ -221,6 +220,39 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     }
 
     /**
+     * Intersects the cursor ray with the chart's plane and returns the resulting X position in
+     * chart-local space.
+     *
+     * The chart is flat, so the cursor ray is intersected with the chart's own plane. Deriving
+     * the plane from the chart's world matrix keeps this correct if the chart is ever moved or
+     * rotated in the scene. The matrix is refreshed by the render loop every frame.
+     *
+     * @returns The chart-local X of the cursor, or `null` when the ray misses the chart plane.
+     */
+    private getChartLocalX(viewportPosition: Gfx.Vector2): number | null {
+        const chart = this.options?.chart;
+        const camera = this.camera;
+
+        if (!chart || !camera)
+            return null;
+
+        this._hoverPlaneNormal.set(0, 0, 1).transformDirection(chart.matrixWorld);
+        this._hoverPlanePoint.set(0, 0, 0).applyMatrix4(chart.matrixWorld);
+        this._hoverPlane.setFromNormalAndCoplanarPoint(this._hoverPlaneNormal, this._hoverPlanePoint);
+
+        this._hoverRaycaster.setFromCamera(viewportPosition, camera.native);
+
+        if (!this._hoverRaycaster.ray.intersectPlane(this._hoverPlane, this._hoverIntersection))
+            return null;
+
+        // The chart may be transformed, so the intersection is converted into chart-local space.
+        this._hoverLocal.copy(this._hoverIntersection);
+        chart.worldToLocal(this._hoverLocal);
+
+        return this._hoverLocal.x;
+    }
+
+    /**
      * Finds the bar column under the cursor, regardless of whether the cursor is exactly on a
      * drawn bar or value point.
      *
@@ -232,42 +264,70 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
      */
     private findNearestBarIndex(viewportPosition: Gfx.Vector2): number {
         const chart = this.options?.chart;
-        const camera = this.camera;
 
-        if (!chart || !camera || chart.series.length === 0)
+        if (!chart || !this.camera || chart.series.length === 0)
             return -1;
 
-        // The chart is flat, so the cursor ray is intersected with the chart's own plane. Deriving
-        // the plane from the chart's world matrix keeps this correct if the chart is ever moved or
-        // rotated in the scene. The matrix is refreshed by the render loop every frame.
-        this._hoverPlaneNormal.set(0, 0, 1).transformDirection(chart.matrixWorld);
-        this._hoverPlanePoint.set(0, 0, 0).applyMatrix4(chart.matrixWorld);
-        this._hoverPlane.setFromNormalAndCoplanarPoint(this._hoverPlaneNormal, this._hoverPlanePoint);
+        const localX = this.getChartLocalX(viewportPosition);
 
-        this._hoverRaycaster.setFromCamera(viewportPosition, camera.native);
-
-        if (!this._hoverRaycaster.ray.intersectPlane(this._hoverPlane, this._hoverIntersection))
+        if (localX === null)
             return -1;
-
-        // The chart may be transformed, so the intersection is converted into chart-local space.
-        this._hoverLocal.copy(this._hoverIntersection);
-        chart.worldToLocal(this._hoverLocal);
 
         const bbox = chart.getBBox();
 
-        if (this._hoverLocal.x < bbox.min.x || this._hoverLocal.x > bbox.max.x ||
+        if (localX < bbox.min.x || localX > bbox.max.x ||
             this._hoverLocal.y < bbox.min.y || this._hoverLocal.y > bbox.max.y)
             return -1;
 
-        const step = (chart.barWidth + chart.barSpacing) * chart.zoom;
+        const step = chart.worldPerBar;
 
         if (!Number.isFinite(step) || step <= 0)
             return -1;
 
         // Bars are laid out at (index + 1) * step in series-local space (see Series.layoutBars()).
-        const index = Math.round((this._hoverLocal.x - chart.series[0].position.x) / step) - 1;
+        const index = Math.round((localX - chart.series[0].position.x) / step) - 1;
 
         return index >= 0 && index < chart.numBarsVisible ? index : -1;
+    }
+
+    /**
+     * World units covered by one screen pixel, per axis.
+     *
+     * Dragging the chart has to move it by the same distance the pointer travelled on screen, so
+     * the pixel delta of a drag is converted into world units with this. The values are derived
+     * from the chart's projected size, so they stay correct if the camera or the viewport changes.
+     */
+    private getWorldPerPixel(): { x: number; y: number } {
+        const chart = this.options.chart;
+        const camera = this.camera;
+        const fallback = { x: 0.002, y: 0.002 };
+
+        if (!chart || !camera)
+            return fallback;
+
+        const canvas = this.renderer.native.domElement;
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+
+        if (width <= 0 || height <= 0)
+            return fallback;
+
+        const bbox = chart.getBBox();
+        const project = (x: number, y: number): Gfx.Vector3 =>
+            new Gfx.Vector3(x, y, 0).applyMatrix4(chart.matrixWorld).project(camera.native);
+
+        const left = project(bbox.min.x, bbox.min.y);
+        const right = project(bbox.max.x, bbox.min.y);
+        const top = project(bbox.min.x, bbox.max.y);
+
+        // NDC spans -1..1, i.e. two units across the whole viewport.
+        const pixelWidth = Math.abs(right.x - left.x) / 2 * width;
+        const pixelHeight = Math.abs(top.y - left.y) / 2 * height;
+
+        return {
+            x: pixelWidth > 0 ? chart.chartWidth / pixelWidth : fallback.x,
+            y: pixelHeight > 0 ? chart.chartHeight / pixelHeight : fallback.y,
+        };
     }
 
     /**
@@ -346,14 +406,16 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         if (e.altKey)
             this.isAltPressed = true;
 
+        // Chart zoom and re-centering are canvas operations, so they only apply while the pointer
+        // is over the canvas — the same rule the mouse-driven operations follow.
+        if (!this.renderer.isPointerOver)
+            return;
+
         if (e.key === '-' || e.key === '+' || e.key === '=') {
             // Changing chart zoom.
             const zoomFactor = e.key === '+' || e.key === '=' ? 2 : 0.5;
 
-            const newZoom = this.options.chart.zoom * zoomFactor;
-
-            // Zoom could be clamped to a reasonable range if desired, e.g.:
-            this.options.chart.zoom = Math.max(1 / 256, Math.min(newZoom, 4));
+            this.options.chart.zoom = Chart.clampZoom(this.options.chart.zoom * zoomFactor);
         }
         else if (e.key === '0') {
             this.options.chart.zoom = 1;
@@ -453,6 +515,16 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         if (!camera)
             return;
 
+        // Mouse movement is tracked on the window so a drag keeps working when the cursor briefly
+        // leaves the canvas, but the chart must only react while the pointer is over the canvas.
+        // Otherwise hovering the side panel would highlight bars and scroll the chart.
+        if (!this.renderer.isPointerOver) {
+            this.isScrolling = false;
+            this.resetHoverStates();
+            this.options?.chart?.setHoveredBarIndex(-1);
+            return;
+        }
+
         this.lastMouseX = e.offsetX;
         this.lastMouseY = e.offsetY;
 
@@ -462,7 +534,21 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
         const viewportPosition = this.renderer.clientToViewport(this._cacheVector2);
 
         if (this.isScrolling) {
-            this.options.chart?.scrollBy(0, e.movementY * -0.002);
+            // Dragging scrolls the chart the same way the pointer moves: dragging left reveals the
+            // bars to the right, dragging up reveals the prices above. The pixel delta is
+            // converted into world units so the chart follows the cursor exactly, and the scroll
+            // is applied without interpolation so the chart does not lag behind the pointer.
+            const worldPerPixel = this.getWorldPerPixel();
+            const chart = this.options.chart;
+
+            if (chart) {
+                chart.scrollTo(
+                    chart.targetScrollX - e.movementX * worldPerPixel.x,
+                    chart.targetScrollY - e.movementY * worldPerPixel.y,
+                    true
+                );
+            }
+
             this._restoreSelection();
         }
         else if (objectPicker) {
@@ -512,13 +598,36 @@ export class ChartObjectManipulator extends RendererPlugin<ChartObjectManipulato
     }
 
     /**
-     * Handles the mouse wheel event to zoom the camera in or out.
+     * Handles the mouse wheel event to zoom the chart in or out around the cursor.
+     *
+     * Scrolling the wheel up zooms in and scrolling it down zooms out. The bar under the cursor
+     * stays under the cursor, so the chart grows towards the pointer instead of its centre.
+     *
      * @param e The wheel event.
      */
     private handleWheel(e: WheelEvent): void {
-        if (e.deltaY !== 0) {
-            this.options.chart?.scrollBy(e.deltaY * -0.002, 0);
-        }
         e.preventDefault();
+
+        const chart = this.options.chart;
+
+        if (!chart || e.deltaY === 0)
+            return;
+
+        // Fractional notches (trackpads) are handled by scaling the factor exponentially, so a
+        // small delta produces a proportionally small zoom change.
+        const notches = -e.deltaY / 100;
+        const factor = Math.pow(Chart.ZOOM_WHEEL_FACTOR, notches);
+
+        // The anchor is the cursor's horizontal position inside the chart, so the bar under the
+        // pointer stays put while zooming.
+        this._cacheVector2.set(e.clientX, e.clientY);
+        const viewportPosition = this.renderer.clientToViewport(this._cacheVector2);
+        const localX = this.getChartLocalX(viewportPosition);
+        const bbox = chart.getBBox();
+        const anchor = localX === null || bbox.max.x <= bbox.min.x
+            ? 0.5
+            : (localX - bbox.min.x) / (bbox.max.x - bbox.min.x);
+
+        chart.zoomBy(factor, anchor);
     }
 }
